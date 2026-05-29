@@ -323,6 +323,55 @@ export class UsersService {
     };
   }
 
+  async getTeamShowcase(userId: string, kind: 'week' | 'tournament', tournamentId?: string) {
+    const user = await this.usersRepository.findOne({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found.');
+    }
+
+    const fantasyTeam = await this.fantasyTeamsRepository.findOne({
+      where: tournamentId
+        ? { user: { id: userId }, tournament: { id: tournamentId } }
+        : { user: { id: userId } },
+      relations: { tournament: true },
+      order: { createdAt: 'DESC' },
+    });
+
+    if (!fantasyTeam) {
+      throw new NotFoundException('Fantasy team not found for this user.');
+    }
+
+    if (kind === 'tournament') {
+      return {
+        kind,
+        title: `${fantasyTeam.tournament.name} Team of the Tournament`,
+        description: 'The highest-performing XI across the full competition based on fantasy points.',
+        players: await this.getTeamOfTheTournamentPlayers(fantasyTeam.tournament.id),
+      };
+    }
+
+    const currentMatchday = await this.matchdaysRepository.findOne({
+      where: {
+        tournament: { id: fantasyTeam.tournament.id },
+        number: fantasyTeam.tournament.currentMatchdayNumber,
+      },
+    });
+
+    if (!currentMatchday) {
+      throw new NotFoundException('Current matchday not found.');
+    }
+
+    return {
+      kind,
+      title: `Gameweek ${currentMatchday.number} Team of the Week`,
+      description: 'The top fantasy performers for the current gameweek.',
+      players: await this.getTeamOfTheWeekPlayers(currentMatchday.id),
+    };
+  }
+
   async updateUserProfile(userId: string, dto: UpdateProfileDto) {
     const user = await this.usersRepository.findOne({
       where: { id: userId },
@@ -809,20 +858,30 @@ export class UsersService {
       .where('fixture.matchday_id = :matchdayId', { matchdayId })
       .orderBy('scoreLog.totalPoints', 'DESC')
       .addOrderBy('player.name', 'ASC')
-      .limit(11)
       .getMany();
 
     if (scoreLogs.length > 0) {
-      return scoreLogs.map((scoreLog) => this.serializePlayer(scoreLog.player));
+      const uniqueLogs = scoreLogs.filter((scoreLog, index, collection) => collection.findIndex((candidate) => candidate.player.id === scoreLog.player.id) === index);
+      return this.selectShowcaseFormation(
+        uniqueLogs.map((scoreLog) => ({
+          player: scoreLog.player,
+          points: scoreLog.totalPoints,
+        })),
+      ).map((entry) => this.serializePlayer(entry.player));
     }
 
     const fallbackPlayers = await this.playersRepository.find({
       relations: { team: true },
       order: { totalPoints: 'DESC', name: 'ASC' },
-      take: 11,
+      take: 40,
     });
 
-    return fallbackPlayers.map((player) => this.serializePlayer(player));
+    return this.selectShowcaseFormation(
+      fallbackPlayers.map((player) => ({
+        player,
+        points: player.totalPoints,
+      })),
+    ).map((entry) => this.serializePlayer(entry.player));
   }
 
   private async getTeamOfTheTournamentPlayers(tournamentId: string) {
@@ -833,10 +892,108 @@ export class UsersService {
       },
       relations: { team: true },
       order: { totalPoints: 'DESC', name: 'ASC' },
-      take: 11,
+      take: 60,
     });
 
-    return topPlayers.map((player) => this.serializePlayer(player));
+    return this.selectShowcaseFormation(
+      topPlayers.map((player) => ({
+        player,
+        points: player.totalPoints,
+      })),
+    ).map((entry) => this.serializePlayer(entry.player));
+  }
+
+  private selectShowcaseFormation(candidates: Array<{ player: PlayerEntity; points: number }>) {
+    const uniqueCandidates = candidates
+      .filter((candidate, index, collection) => collection.findIndex((item) => item.player.id === candidate.player.id) === index)
+      .sort((left, right) => {
+        if (right.points !== left.points) {
+          return right.points - left.points;
+        }
+
+        return left.player.name.localeCompare(right.player.name);
+      });
+
+    const goalkeepers = uniqueCandidates.filter((candidate) => candidate.player.position === 'GK');
+    const defenders = uniqueCandidates.filter((candidate) => candidate.player.position === 'DEF');
+    const midfielders = uniqueCandidates.filter((candidate) => candidate.player.position === 'MID');
+    const forwards = uniqueCandidates.filter((candidate) => candidate.player.position === 'FWD');
+
+    const selected: Array<{ player: PlayerEntity; points: number }> = [];
+
+    if (goalkeepers[0]) {
+      selected.push(goalkeepers[0]);
+    }
+
+    selected.push(...defenders.slice(0, 3));
+    selected.push(...midfielders.slice(0, 2));
+    selected.push(...forwards.slice(0, 1));
+
+    const selectedIds = new Set(selected.map((candidate) => candidate.player.id));
+    const optionalPool = [
+      ...defenders.slice(3).map((candidate) => ({ ...candidate, order: 0 })),
+      ...midfielders.slice(2).map((candidate) => ({ ...candidate, order: 1 })),
+      ...forwards.slice(1).map((candidate) => ({ ...candidate, order: 2 })),
+    ]
+      .filter((candidate) => !selectedIds.has(candidate.player.id))
+      .sort((left, right) => {
+        if (right.points !== left.points) {
+          return right.points - left.points;
+        }
+
+        if (left.order !== right.order) {
+          return left.order - right.order;
+        }
+
+        return left.player.name.localeCompare(right.player.name);
+      });
+
+    let defenderCount = selected.filter((candidate) => candidate.player.position === 'DEF').length;
+    let midfielderCount = selected.filter((candidate) => candidate.player.position === 'MID').length;
+    let forwardCount = selected.filter((candidate) => candidate.player.position === 'FWD').length;
+
+    for (const candidate of optionalPool) {
+      if (selected.length >= 11) {
+        break;
+      }
+
+      if (candidate.player.position === 'DEF' && defenderCount >= 5) {
+        continue;
+      }
+
+      if (candidate.player.position === 'MID' && midfielderCount >= 5) {
+        continue;
+      }
+
+      if (candidate.player.position === 'FWD' && forwardCount >= 3) {
+        continue;
+      }
+
+      selected.push(candidate);
+      selectedIds.add(candidate.player.id);
+
+      if (candidate.player.position === 'DEF') {
+        defenderCount += 1;
+      } else if (candidate.player.position === 'MID') {
+        midfielderCount += 1;
+      } else if (candidate.player.position === 'FWD') {
+        forwardCount += 1;
+      }
+    }
+
+    if (selected.length < 11) {
+      const fallbackPool = uniqueCandidates.filter((candidate) => !selectedIds.has(candidate.player.id));
+      for (const candidate of fallbackPool) {
+        if (selected.length >= 11) {
+          break;
+        }
+
+        selected.push(candidate);
+        selectedIds.add(candidate.player.id);
+      }
+    }
+
+    return selected.slice(0, 11);
   }
 
   private async countChipActivations(matchdayId: string, chipType: ChipType) {
