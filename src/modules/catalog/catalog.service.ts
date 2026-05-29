@@ -7,6 +7,7 @@ import { FantasyTeamEntity } from '../fantasy/entities/fantasy-team.entity';
 import { TransferEntity } from '../fantasy/entities/transfer.entity';
 import { PlayerScoreEventEntity } from '../scoring/entities/player-score-event.entity';
 import { MatchdayEntity } from '../tournament/entities/matchday.entity';
+import { TournamentService } from '../tournament/tournament.service';
 
 import { PlayerEntity } from './entities/player.entity';
 import { PlayerPriceEntity } from './entities/player-price.entity';
@@ -34,9 +35,11 @@ export class CatalogService {
     private readonly transfersRepository: Repository<TransferEntity>,
     @InjectRepository(MatchdayEntity)
     private readonly matchdaysRepository: Repository<MatchdayEntity>,
+    private readonly tournamentService: TournamentService,
   ) {}
 
   async getTeams(tournamentId?: string) {
+    const resolvedTournamentId = tournamentId ?? (await this.tournamentService.getCurrentTournament()).id;
     const queryBuilder = this.teamsRepository
       .createQueryBuilder('team')
       .leftJoinAndSelect('team.group', 'group')
@@ -44,9 +47,7 @@ export class CatalogService {
       .orderBy('group.displayOrder', 'ASC')
       .addOrderBy('team.name', 'ASC');
 
-    if (tournamentId) {
-      queryBuilder.where('tournament.id = :tournamentId', { tournamentId });
-    }
+    queryBuilder.where('tournament.id = :tournamentId', { tournamentId: resolvedTournamentId });
 
     return queryBuilder.getMany();
   }
@@ -58,6 +59,7 @@ export class CatalogService {
     maxPrice?: number;
     minPrice?: number;
   }) {
+    const resolvedTournamentId = options.tournamentId ?? (await this.tournamentService.getCurrentTournament()).id;
     const queryBuilder = this.playersRepository
       .createQueryBuilder('player')
       .leftJoinAndSelect('player.team', 'team')
@@ -65,9 +67,7 @@ export class CatalogService {
       .orderBy('player.totalPoints', 'DESC')
       .addOrderBy('player.name', 'ASC');
 
-    if (options.tournamentId) {
-      queryBuilder.andWhere('team.tournament_id = :tournamentId', { tournamentId: options.tournamentId });
-    }
+    queryBuilder.andWhere('team.tournament_id = :tournamentId', { tournamentId: resolvedTournamentId });
 
     if (options.teamId) {
       queryBuilder.andWhere('team.id = :teamId', { teamId: options.teamId });
@@ -86,7 +86,7 @@ export class CatalogService {
     }
 
     const players = await queryBuilder.getMany();
-    return this.enrichPlayers(players, options.tournamentId);
+    return this.enrichPlayers(players, resolvedTournamentId);
   }
 
   async getPlayerById(playerId: string) {

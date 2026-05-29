@@ -129,6 +129,10 @@ export class FantasyService {
     fantasyTeam = await this.syncChipState(fantasyTeam);
     fantasyTeam.picks = await this.hydrateMissingPlayersOnPicks(fantasyTeam.picks);
 
+    if (fantasyTeam.tournament?.format !== 'world_cup') {
+      throw new NotFoundException('This app only supports FIFA World Cup fantasy data.');
+    }
+
     return fantasyTeam;
   }
 

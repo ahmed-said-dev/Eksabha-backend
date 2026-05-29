@@ -200,9 +200,11 @@ export class AuthService {
       fantasyTeams.map((fantasyTeam) => [fantasyTeam.tournament.id, fantasyTeam]),
     );
 
+    const worldCupTournaments = tournaments.filter((tournament) => tournament.format === 'world_cup');
+
     return {
       user: this.buildUserResponse(user),
-      tournaments: tournaments.map((tournament) => ({
+      tournaments: worldCupTournaments.map((tournament) => ({
         id: tournament.id,
         competitionKey: tournament.competitionKey,
         name: tournament.name,
@@ -234,6 +236,10 @@ export class AuthService {
 
     if (!tournament) {
       throw new UnauthorizedException('Tournament not found.');
+    }
+
+    if (tournament.format !== 'world_cup') {
+      throw new UnauthorizedException('This app only supports FIFA World Cup fantasy competitions.');
     }
 
     const fantasyTeam = await this.fantasyTeamsRepository.findOne({

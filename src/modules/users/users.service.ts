@@ -91,6 +91,10 @@ export class UsersService {
       throw new NotFoundException('Fantasy team not found for this user.');
     }
 
+    if (fantasyTeam.tournament.format !== 'world_cup') {
+      throw new NotFoundException('This app only supports FIFA World Cup fantasy data.');
+    }
+
     const currentMatchday = await this.matchdaysRepository.findOne({
       where: {
         tournament: { id: fantasyTeam.tournament.id },
@@ -342,6 +346,10 @@ export class UsersService {
 
     if (!fantasyTeam) {
       throw new NotFoundException('Fantasy team not found for this user.');
+    }
+
+    if (fantasyTeam.tournament.format !== 'world_cup') {
+      throw new NotFoundException('This app only supports FIFA World Cup fantasy data.');
     }
 
     if (kind === 'tournament') {
