@@ -233,6 +233,46 @@ export class LeaguesService {
     };
   }
 
+  async getLeaguesForFantasyTeam(fantasyTeamId: string) {
+    const fantasyTeam = await this.fantasyTeamsRepository.findOne({
+      where: { id: fantasyTeamId },
+      relations: { tournament: true },
+    });
+
+    if (!fantasyTeam) {
+      throw new NotFoundException('Fantasy team not found.');
+    }
+
+    const currentMatchday = fantasyTeam.tournament ? await this.resolveCurrentMatchday(fantasyTeam.tournament.id) : null;
+    const leagues = await this.loadLeaguesForTournament(fantasyTeam.tournament?.id ?? null);
+    const leagueIds = leagues.map((league) => league.id);
+    const countsByLeagueId = await this.loadLeagueMemberCounts(leagueIds);
+    const memberships = leagueIds.length === 0
+      ? []
+      : await this.leagueMembershipsRepository.find({
+        where: {
+          fantasyTeam: { id: fantasyTeamId },
+          league: In(leagueIds.map((id) => ({ id })) as any),
+          status: LeagueMembershipStatus.ACTIVE,
+        },
+        relations: { league: true, fantasyTeam: true },
+      });
+    const memberLeagueIds = new Set(memberships.map((membership) => membership.league.id));
+    const entriesByLeagueId = await this.loadUserLeagueEntriesByLeagueId(fantasyTeamId, leagueIds, currentMatchday?.id);
+    const overallEntriesByLeagueId = await this.loadUserLeagueEntriesByLeagueId(fantasyTeamId, leagueIds);
+
+    return leagues
+      .filter((league) => memberLeagueIds.has(league.id))
+      .map((league) => this.buildLeagueOverviewCard({
+        league,
+        currentMatchday,
+        countsByLeagueId,
+        overallEntry: overallEntriesByLeagueId.get(league.id) ?? null,
+        matchdayEntry: entriesByLeagueId.get(league.id) ?? null,
+        isMember: true,
+      }));
+  }
+
   async getLeagues() {
     return this.leaguesRepository.find({
       relations: { owner: { profile: true }, tournament: true },

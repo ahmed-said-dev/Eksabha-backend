@@ -25,8 +25,11 @@ export class FantasyController {
   }
 
   @Get('team/:fantasyTeamId')
-  getFantasyTeamById(@Param('fantasyTeamId') fantasyTeamId: string) {
-    return this.fantasyService.getFantasyTeam(fantasyTeamId);
+  getFantasyTeamById(@Param('fantasyTeamId') fantasyTeamId: string, @Query('matchdayNumber') matchdayNumber?: string) {
+    return this.fantasyService.getFantasyTeam(
+      fantasyTeamId,
+      matchdayNumber ? Number.parseInt(matchdayNumber, 10) : undefined,
+    );
   }
 
   @Patch('team')

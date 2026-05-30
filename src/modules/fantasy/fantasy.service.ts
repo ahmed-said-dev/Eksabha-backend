@@ -74,6 +74,18 @@ type FantasyTeamWithInsights = FantasyTeamEntity & {
   transfersSummary: FantasyTeamTransferSummary;
   recentTransfers: FantasyTeamTransferRow[];
   transferHistory: FantasyTeamTransferRow[];
+  availableMatchdays?: Array<{
+    id: string;
+    number: number;
+    label: string;
+    isCurrent: boolean;
+  }>;
+  selectedMatchday?: {
+    id: string;
+    number: number;
+    label: string;
+    isCurrent: boolean;
+  } | null;
 };
 
 @Injectable()
@@ -136,9 +148,9 @@ export class FantasyService {
     return fantasyTeam;
   }
 
-  async getFantasyTeam(fantasyTeamId: string): Promise<FantasyTeamWithInsights> {
+  async getFantasyTeam(fantasyTeamId: string, matchdayNumber?: number): Promise<FantasyTeamWithInsights> {
     const fantasyTeam = await this.getFantasyTeamCore(fantasyTeamId);
-    return this.attachTransferInsights(fantasyTeam);
+    return this.attachTransferInsights(fantasyTeam, matchdayNumber);
   }
 
   private async getFantasyTeamCore(fantasyTeamId: string): Promise<FantasyTeamEntity> {
@@ -187,10 +199,56 @@ export class FantasyService {
     };
   }
 
-  private async attachTransferInsights(fantasyTeam: FantasyTeamEntity): Promise<FantasyTeamWithInsights> {
-    const currentMatchday = fantasyTeam.tournament?.currentMatchdayNumber
-      ? await this.getCurrentMatchday(fantasyTeam.tournament.id, fantasyTeam.tournament.currentMatchdayNumber)
-      : null;
+  private async attachTransferInsights(fantasyTeam: FantasyTeamEntity, matchdayNumber?: number): Promise<FantasyTeamWithInsights> {
+    const availableMatchdays = fantasyTeam.tournament?.id
+      ? await this.matchdaysRepository.find({
+        where: { tournament: { id: fantasyTeam.tournament.id } },
+        relations: { tournament: true },
+        order: { number: 'DESC' },
+      })
+      : [];
+
+    const resolvedMatchday = matchdayNumber !== undefined
+      ? availableMatchdays.find((matchday) => matchday.number === matchdayNumber) ?? null
+      : (fantasyTeam.tournament?.currentMatchdayNumber
+        ? await this.getCurrentMatchday(fantasyTeam.tournament.id, fantasyTeam.tournament.currentMatchdayNumber)
+        : null);
+
+    const currentMatchday = resolvedMatchday;
+
+    let resolvedPicks = fantasyTeam.picks;
+    if (currentMatchday && currentMatchday.number !== fantasyTeam.tournament?.currentMatchdayNumber) {
+      const snapshot = await this.fantasyTeamSnapshotsRepository.findOne({
+        where: { fantasyTeam: { id: fantasyTeam.id }, matchday: { id: currentMatchday.id } },
+        relations: { picks: { player: { team: true } }, matchday: true, fantasyTeam: true },
+      });
+
+      if (snapshot) {
+        resolvedPicks = snapshot.picks.map((pickSnapshot) => this.fantasyPicksRepository.create({
+          fantasyTeam,
+          player: pickSnapshot.player,
+          playerId: pickSnapshot.player.id,
+          positionOrder: pickSnapshot.positionOrder,
+          isCaptain: pickSnapshot.isCaptain,
+          isViceCaptain: pickSnapshot.isViceCaptain,
+          isBenched: pickSnapshot.isBenched,
+          multiplier: pickSnapshot.multiplier,
+          buyPrice: pickSnapshot.buyPrice,
+          sellPrice: pickSnapshot.sellPrice,
+          livePoints: pickSnapshot.livePoints,
+        }));
+
+        fantasyTeam.name = snapshot.name;
+        fantasyTeam.formationCode = snapshot.formationCode;
+        fantasyTeam.budgetRemaining = snapshot.budgetRemaining;
+        fantasyTeam.totalBudget = snapshot.totalBudget;
+        fantasyTeam.teamValue = snapshot.teamValue;
+        fantasyTeam.freeTransfers = snapshot.freeTransfers;
+        fantasyTeam.activeChipType = snapshot.activeChipType;
+      }
+    }
+
+    fantasyTeam.picks = resolvedPicks;
 
     const [totalsRow, thisRoundRow, transferHistory] = await Promise.all([
       this.transfersRepository
@@ -241,6 +299,20 @@ export class FantasyService {
       },
       recentTransfers: mappedTransferHistory.slice(0, 5),
       transferHistory: mappedTransferHistory,
+      availableMatchdays: availableMatchdays.map((matchday) => ({
+        id: matchday.id,
+        number: matchday.number,
+        label: `Round ${matchday.number}`,
+        isCurrent: matchday.number === fantasyTeam.tournament?.currentMatchdayNumber,
+      })),
+      selectedMatchday: currentMatchday
+        ? {
+          id: currentMatchday.id,
+          number: currentMatchday.number,
+          label: `Round ${currentMatchday.number}`,
+          isCurrent: currentMatchday.number === fantasyTeam.tournament?.currentMatchdayNumber,
+        }
+        : null,
     });
   }
 

@@ -34,6 +34,11 @@ export class LeaguesController {
     return this.leaguesService.getCreateJoinOptionsForUser(user.sub, tournamentId ?? user.selectedTournamentId ?? undefined);
   }
 
+  @Get('fantasy-team/:fantasyTeamId')
+  getLeaguesForFantasyTeam(@Param('fantasyTeamId') fantasyTeamId: string) {
+    return this.leaguesService.getLeaguesForFantasyTeam(fantasyTeamId);
+  }
+
   @Get(':leagueId')
   getLeagueById(@Param('leagueId') leagueId: string) {
     return this.leaguesService.getLeagueById(leagueId);
