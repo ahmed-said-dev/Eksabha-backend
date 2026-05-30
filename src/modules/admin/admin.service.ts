@@ -20,6 +20,7 @@ import { LeaderboardsService } from '../leaderboards/leaderboards.service';
 import { LeaderboardEntryEntity } from '../leaderboards/entities/leaderboard-entry.entity';
 import { LeagueMembershipEntity, LeagueMembershipRole } from '../leagues/entities/league-membership.entity';
 import { LeagueEntity } from '../leagues/entities/league.entity';
+import { LeaguesService } from '../leagues/leagues.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationEntity } from '../notifications/entities/notification.entity';
 import { RealtimeEventsService } from '../realtime/realtime-events.service';
@@ -108,6 +109,7 @@ export class AdminService {
     @InjectRepository(MatchdayLockEntity)
     private readonly matchdayLocksRepository: Repository<MatchdayLockEntity>,
     private readonly scoringService: ScoringService,
+    private readonly leaguesService: LeaguesService,
     private readonly leaderboardsService: LeaderboardsService,
     private readonly deadlineLockService: DeadlineLockService,
     private readonly notificationsService: NotificationsService,
@@ -1787,6 +1789,7 @@ export class AdminService {
 
     const updatedTournament = await this.tournamentsRepository.save(tournament);
 
+
     await this.recordAuditLog({
       actionType: 'tournament_ops_update',
       targetType: 'tournament',
@@ -2444,6 +2447,8 @@ export class AdminService {
     }
 
     const updatedTournament = await this.tournamentsRepository.save(tournament);
+
+    await this.leaguesService.finalizeCupProgressionForMatchday(matchday.id);
 
     await this.recordAuditLog({
       actionType: 'deadline_post_update_complete',

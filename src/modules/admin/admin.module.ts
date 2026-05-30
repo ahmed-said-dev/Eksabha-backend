@@ -8,6 +8,7 @@ import { FantasyTeamEntity } from '../fantasy/entities/fantasy-team.entity';
 import { ChipActivationEntity } from '../fantasy/entities/chip-activation.entity';
 import { LeaderboardsModule } from '../leaderboards/leaderboards.module';
 import { LeaderboardEntryEntity } from '../leaderboards/entities/leaderboard-entry.entity';
+import { LeaguesModule } from '../leagues/leagues.module';
 import { LeagueEntity } from '../leagues/entities/league.entity';
 import { LeagueMembershipEntity } from '../leagues/entities/league-membership.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -37,6 +38,7 @@ import { AdminService } from './admin.service';
     FantasyModule,
     ScoringModule,
     LeaderboardsModule,
+    LeaguesModule,
     NotificationsModule,
     RealtimeModule,
     TypeOrmModule.forFeature([

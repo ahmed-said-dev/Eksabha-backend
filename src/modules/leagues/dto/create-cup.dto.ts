@@ -11,6 +11,10 @@ export class CreateCupDto {
 
   @IsOptional()
   @IsString()
+  leagueId?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(500)
   description?: string;
 
