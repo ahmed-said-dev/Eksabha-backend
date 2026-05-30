@@ -249,14 +249,14 @@ export class LeaguesService {
     const countsByLeagueId = await this.loadLeagueMemberCounts(leagueIds);
     const memberships = leagueIds.length === 0
       ? []
-      : await this.leagueMembershipsRepository.find({
-        where: {
-          fantasyTeam: { id: fantasyTeamId },
-          league: In(leagueIds.map((id) => ({ id })) as any),
-          status: LeagueMembershipStatus.ACTIVE,
-        },
-        relations: { league: true, fantasyTeam: true },
-      });
+      : await this.leagueMembershipsRepository
+        .createQueryBuilder('membership')
+        .leftJoinAndSelect('membership.league', 'league')
+        .leftJoinAndSelect('membership.fantasyTeam', 'fantasyTeam')
+        .where('membership.fantasy_team_id = :fantasyTeamId', { fantasyTeamId })
+        .andWhere('membership.league_id IN (:...leagueIds)', { leagueIds })
+        .andWhere('membership.status = :status', { status: LeagueMembershipStatus.ACTIVE })
+        .getMany();
     const memberLeagueIds = new Set(memberships.map((membership) => membership.league.id));
     const entriesByLeagueId = await this.loadUserLeagueEntriesByLeagueId(fantasyTeamId, leagueIds, currentMatchday?.id);
     const overallEntriesByLeagueId = await this.loadUserLeagueEntriesByLeagueId(fantasyTeamId, leagueIds);
