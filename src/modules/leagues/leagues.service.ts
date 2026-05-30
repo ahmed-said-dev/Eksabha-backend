@@ -680,6 +680,12 @@ export class LeaguesService {
     }
 
     const tournament = cup.tournament ?? await this.resolveTournament(null);
+    if (cup.entryCutoffMatchdayNumber) {
+      const currentMatchday = await this.resolveCurrentMatchday(tournament?.id ?? '');
+      if (currentMatchday && currentMatchday.number > cup.entryCutoffMatchdayNumber) {
+        throw new BadRequestException('This cup is no longer accepting new entries — the entry cutoff matchday has passed.');
+      }
+    }
     const fantasyTeam = await this.resolveFantasyTeamForUser(userId, tournament?.id ?? null);
     if (!fantasyTeam) {
       throw new NotFoundException('Fantasy team not found for this tournament.');
@@ -788,11 +794,10 @@ export class LeaguesService {
     }
 
     const linkedLeagueCups = await this.cupsRepository.find({
-      where: {
-        league: { id: league.id },
-        type: CupType.LEAGUE,
-        status: CupStatus.UPCOMING,
-      },
+      where: [
+        { league: { id: league.id }, type: CupType.LEAGUE, status: CupStatus.UPCOMING },
+        { league: { id: league.id }, type: CupType.LEAGUE, status: CupStatus.LIVE },
+      ],
       relations: { league: true },
     });
 
@@ -1020,6 +1025,7 @@ export class LeaguesService {
       throw new NotFoundException('Matchday not found for cup progression.');
     }
 
+    // 1. Activate pending entries for this matchday
     const pendingEntries = await this.leaguePendingEntriesRepository.find({
       where: {
         activationMatchday: { id: matchdayId },
@@ -1036,68 +1042,88 @@ export class LeaguesService {
       await this.leaguePendingEntriesRepository.save(pendingEntry);
     }
 
+    // 2. Load all cups for this tournament
     const cups = await this.cupsRepository.find({
       where: { tournament: { id: matchday.tournament.id } },
-      relations: { entries: { membership: { fantasyTeam: true, user: { profile: true } } }, rounds: true, fixtures: { round: true, homeEntry: true, awayEntry: true, winnerEntry: true }, league: true },
+      relations: {
+        entries: { membership: { fantasyTeam: true, user: { profile: true } } },
+        rounds: true,
+        fixtures: {
+          round: true,
+          homeEntry: { membership: { fantasyTeam: true } },
+          awayEntry: { membership: { fantasyTeam: true } },
+          winnerEntry: { membership: { fantasyTeam: true } },
+        },
+        league: true,
+      },
     });
 
-    for (const cup of cups) {
-      const activeEntries = cup.entries.filter((entry) => entry.status === CupEntryStatus.ACTIVE);
-      const hasExistingRoundForMatchday = cup.rounds.some((round) => round.matchdayNumber === matchday.number);
+    // 3. Load matchday scores from global leaderboard
+    const globalEntries = await this.leaderboardEntriesRepository.find({
+      where: {
+        matchday: { id: matchday.id },
+        scope: 'global',
+      },
+      relations: { fantasyTeam: true, matchday: true },
+    });
+    const matchdayPointsByFantasyTeamId = new Map(
+      globalEntries.map((entry) => [entry.fantasyTeam.id, entry.matchdayPoints]),
+    );
+    const overallPointsByFantasyTeamId = new Map(
+      globalEntries.map((entry) => [entry.fantasyTeam.id, entry.totalPoints]),
+    );
 
-      if (activeEntries.length < 2 || hasExistingRoundForMatchday) {
+    for (const cup of cups) {
+      if (cup.status === CupStatus.COMPLETED) {
         continue;
       }
 
-      const shuffledEntries = [...activeEntries].sort(() => Math.random() - 0.5);
-      const round = await this.cupRoundsRepository.save(this.cupRoundsRepository.create({
-        cup,
-        name: cup.rounds.length === 0 ? 'Round of Participants' : `Round ${cup.rounds.length + 1}`,
-        sequenceNumber: cup.rounds.length + 1,
-        matchdayNumber: matchday.number,
-        status: CupRoundStatus.UPCOMING,
-      }));
+      const activeEntries = cup.entries.filter((entry) => entry.status === CupEntryStatus.ACTIVE);
+      const hasExistingRounds = cup.rounds.length > 0;
+      const hasRoundForThisMatchday = cup.rounds.some((round) => round.matchdayNumber === matchday.number);
 
-      for (let index = 0; index < shuffledEntries.length; index += 2) {
-        const homeEntry = shuffledEntries[index] ?? null;
-        const awayEntry = shuffledEntries[index + 1] ?? null;
-
-        await this.cupFixturesRepository.save(this.cupFixturesRepository.create({
+      // 3a. Create initial draw if no rounds exist yet and enough participants
+      if (!hasExistingRounds && activeEntries.length >= 2) {
+        const shuffledEntries = [...activeEntries].sort(() => Math.random() - 0.5);
+        const round = await this.cupRoundsRepository.save(this.cupRoundsRepository.create({
           cup,
-          round,
-          homeEntry,
-          awayEntry,
-          winnerEntry: null,
-          status: CupFixtureStatus.UPCOMING,
-          homeScore: null,
-          awayScore: null,
-          legLabel: awayEntry ? null : 'Average Score',
+          name: this.getCupRoundName(shuffledEntries.length),
+          sequenceNumber: 1,
+          matchdayNumber: matchday.number,
+          status: CupRoundStatus.UPCOMING,
         }));
+
+        for (let index = 0; index < shuffledEntries.length; index += 2) {
+          const homeEntry = shuffledEntries[index] ?? null;
+          const awayEntry = shuffledEntries[index + 1] ?? null;
+
+          await this.cupFixturesRepository.save(this.cupFixturesRepository.create({
+            cup,
+            round,
+            homeEntry,
+            awayEntry,
+            winnerEntry: null,
+            status: CupFixtureStatus.UPCOMING,
+            homeScore: null,
+            awayScore: null,
+            legLabel: awayEntry ? null : 'BYE',
+          }));
+        }
+
+        cup.status = CupStatus.LIVE;
+        await this.cupsRepository.save(cup);
+
+        // Push new round into in-memory array so it can be found below
+        cup.rounds.push(round);
       }
 
-      cup.status = CupStatus.LIVE;
-      await this.cupsRepository.save(cup);
-
-      const roundEntries = await this.leaderboardEntriesRepository.find({
-        where: {
-          matchday: { id: matchday.id },
-          scope: 'global',
-        },
-        relations: { fantasyTeam: true, matchday: true },
-      });
-      const matchdayPointsByFantasyTeamId = new Map(roundEntries.map((entry) => [entry.fantasyTeam.id, entry.matchdayPoints]));
-      const overallPointsByFantasyTeamId = new Map(roundEntries.map((entry) => [entry.fantasyTeam.id, entry.totalPoints]));
-      const participantScores = activeEntries
-        .map((entry) => entry.membership.fantasyTeam?.id ? (matchdayPointsByFantasyTeamId.get(entry.membership.fantasyTeam.id) ?? 0) : 0);
-      const averageScore = participantScores.length
-        ? Number((participantScores.reduce((sum, value) => sum + value, 0) / participantScores.length).toFixed(2))
-        : 0;
-
+      // 3b. Find and resolve the current round for this matchday
       const currentRound = cup.rounds.find((round) => round.matchdayNumber === matchday.number) ?? null;
       if (!currentRound) {
         continue;
       }
 
+      // Load fixtures fresh from DB (may have just been created above)
       const currentFixtures = await this.cupFixturesRepository.find({
         where: { round: { id: currentRound.id } },
         relations: {
@@ -1109,37 +1135,71 @@ export class LeaguesService {
         },
       });
 
+      // Calculate average score (rounded integer) from all active participants
+      const participantScores = activeEntries
+        .map((entry) => entry.membership.fantasyTeam?.id ? (matchdayPointsByFantasyTeamId.get(entry.membership.fantasyTeam.id) ?? 0) : 0);
+      const averageScore = participantScores.length
+        ? Math.round(participantScores.reduce((sum, value) => sum + value, 0) / participantScores.length)
+        : 0;
+
+      // Resolve each fixture
       for (const fixture of currentFixtures) {
+        if (fixture.status === CupFixtureStatus.FINALIZED) {
+          continue;
+        }
+
         const homeFantasyTeamId = fixture.homeEntry?.membership.fantasyTeam?.id ?? null;
         const awayFantasyTeamId = fixture.awayEntry?.membership.fantasyTeam?.id ?? null;
+
+        // BYE: no away entry — home wins automatically
+        if (!fixture.awayEntry) {
+          fixture.homeScore = homeFantasyTeamId ? (matchdayPointsByFantasyTeamId.get(homeFantasyTeamId) ?? 0) : 0;
+          fixture.awayScore = null;
+          fixture.winnerEntry = fixture.homeEntry;
+          fixture.status = CupFixtureStatus.FINALIZED;
+          fixture.legLabel = 'BYE';
+          await this.cupFixturesRepository.save(fixture);
+          continue;
+        }
+
         const homeScore = homeFantasyTeamId ? (matchdayPointsByFantasyTeamId.get(homeFantasyTeamId) ?? 0) : averageScore;
         const awayScore = awayFantasyTeamId ? (matchdayPointsByFantasyTeamId.get(awayFantasyTeamId) ?? 0) : averageScore;
-        fixture.homeScore = Math.round(homeScore);
-        fixture.awayScore = Math.round(awayScore);
-
-        const homeOverall = homeFantasyTeamId ? (overallPointsByFantasyTeamId.get(homeFantasyTeamId) ?? 0) : -1;
-        const awayOverall = awayFantasyTeamId ? (overallPointsByFantasyTeamId.get(awayFantasyTeamId) ?? 0) : -1;
+        fixture.homeScore = homeScore;
+        fixture.awayScore = awayScore;
 
         if (homeScore > awayScore) {
           fixture.winnerEntry = fixture.homeEntry;
         } else if (awayScore > homeScore) {
           fixture.winnerEntry = fixture.awayEntry;
         } else {
+          // Tie-break: higher overall total points
+          const homeOverall = homeFantasyTeamId ? (overallPointsByFantasyTeamId.get(homeFantasyTeamId) ?? 0) : -1;
+          const awayOverall = awayFantasyTeamId ? (overallPointsByFantasyTeamId.get(awayFantasyTeamId) ?? 0) : -1;
           fixture.winnerEntry = homeOverall >= awayOverall ? fixture.homeEntry : fixture.awayEntry;
         }
 
         fixture.status = CupFixtureStatus.FINALIZED;
         await this.cupFixturesRepository.save(fixture);
+
+        // Mark loser as ELIMINATED
+        const loserEntry = fixture.winnerEntry?.id === fixture.homeEntry?.id ? fixture.awayEntry : fixture.homeEntry;
+        if (loserEntry) {
+          loserEntry.status = CupEntryStatus.ELIMINATED;
+          await this.cupEntriesRepository.save(loserEntry);
+        }
       }
 
+      // Mark current round as completed
       currentRound.status = CupRoundStatus.COMPLETED;
       await this.cupRoundsRepository.save(currentRound);
 
+      // Collect winners from resolved fixtures
       const winningEntries = currentFixtures
         .map((fixture) => fixture.winnerEntry)
         .filter((entry): entry is CupEntryEntity => Boolean(entry));
 
       if (winningEntries.length === 1) {
+        // Cup has a champion
         winningEntries[0].status = CupEntryStatus.WINNER;
         await this.cupEntriesRepository.save(winningEntries[0]);
         cup.status = CupStatus.COMPLETED;
@@ -1148,9 +1208,10 @@ export class LeaguesService {
       }
 
       if (winningEntries.length > 1) {
+        // Create next round for the winners
         const nextRound = await this.cupRoundsRepository.save(this.cupRoundsRepository.create({
           cup,
-          name: `Round ${currentRound.sequenceNumber + 1}`,
+          name: this.getCupRoundName(winningEntries.length),
           sequenceNumber: currentRound.sequenceNumber + 1,
           matchdayNumber: matchday.number + 1,
           status: CupRoundStatus.UPCOMING,
@@ -1158,16 +1219,19 @@ export class LeaguesService {
 
         const shuffledWinners = [...winningEntries].sort(() => Math.random() - 0.5);
         for (let index = 0; index < shuffledWinners.length; index += 2) {
+          const homeEntry = shuffledWinners[index] ?? null;
+          const awayEntry = shuffledWinners[index + 1] ?? null;
+
           await this.cupFixturesRepository.save(this.cupFixturesRepository.create({
             cup,
             round: nextRound,
-            homeEntry: shuffledWinners[index] ?? null,
-            awayEntry: shuffledWinners[index + 1] ?? null,
+            homeEntry,
+            awayEntry,
             winnerEntry: null,
             status: CupFixtureStatus.UPCOMING,
             homeScore: null,
             awayScore: null,
-            legLabel: shuffledWinners[index + 1] ? null : 'Average Score',
+            legLabel: awayEntry ? null : 'BYE',
           }));
         }
       }
@@ -1178,6 +1242,16 @@ export class LeaguesService {
       activatedEntries: pendingEntries.length,
       cupsReviewed: cups.length,
     };
+  }
+
+  private getCupRoundName(participantCount: number): string {
+    if (participantCount <= 2) return 'Final';
+    if (participantCount <= 4) return 'Semi-Finals';
+    if (participantCount <= 8) return 'Quarter-Finals';
+    if (participantCount <= 16) return 'Round of 16';
+    if (participantCount <= 32) return 'Round of 32';
+    if (participantCount <= 64) return 'Round of 64';
+    return `Round of ${participantCount}`;
   }
 
   private buildMovement(rank: number | null, previousRank: number | null): LeagueMovement {
