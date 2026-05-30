@@ -16,6 +16,7 @@ import { CupEntity } from './entities/cup.entity';
 import { LeagueHeadToHeadFixtureEntity } from './entities/league-head-to-head-fixture.entity';
 import { LeagueEntity } from './entities/league.entity';
 import { LeagueMembershipEntity } from './entities/league-membership.entity';
+import { LeagueHeadToHeadStandingEntity } from './entities/league-head-to-head-standing.entity';
 import { LeaguePendingEntryEntity } from './entities/league-pending-entry.entity';
 
 @Module({
@@ -26,6 +27,7 @@ import { LeaguePendingEntryEntity } from './entities/league-pending-entry.entity
       LeagueMembershipEntity,
       LeaguePendingEntryEntity,
       LeagueHeadToHeadFixtureEntity,
+      LeagueHeadToHeadStandingEntity,
       CupEntity,
       CupEntryEntity,
       CupRoundEntity,

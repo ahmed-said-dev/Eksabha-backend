@@ -9,6 +9,7 @@ import { MatchdayEntity } from '../tournament/entities/matchday.entity';
 import { LeaderboardsController } from './leaderboards.controller';
 import { LeaderboardEntryEntity } from './entities/leaderboard-entry.entity';
 import { LeaderboardsService } from './leaderboards.service';
+import { LeaguesModule } from '../leagues/leagues.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { LeaderboardsService } from './leaderboards.service';
       PlayerScoreLogEntity,
       MatchdayEntity,
     ]),
+    LeaguesModule,
   ],
   controllers: [LeaderboardsController],
   providers: [LeaderboardsService],

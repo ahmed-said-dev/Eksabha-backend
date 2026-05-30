@@ -100,4 +100,34 @@ export class LeaguesController {
   joinCup(@CurrentUser() user: JwtAccessPayload, @Body() dto: JoinCupDto) {
     return this.leaguesService.joinCupForUser(user.sub, dto);
   }
+
+  // ── Head-to-Head ──────────────────────────────────────────────────────
+
+  @UseGuards(JwtAuthGuard)
+  @Post(':leagueId/h2h/generate')
+  generateHeadToHeadFixtures(
+    @CurrentUser() user: JwtAccessPayload,
+    @Param('leagueId') leagueId: string,
+  ) {
+    return this.leaguesService.generateHeadToHeadFixtures(leagueId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post(':leagueId/h2h/lock')
+  lockHeadToHeadLeague(
+    @CurrentUser() user: JwtAccessPayload,
+    @Param('leagueId') leagueId: string,
+  ) {
+    return this.leaguesService.lockHeadToHeadLeagueAndGenerateFixtures(leagueId);
+  }
+
+  @Get(':leagueId/h2h/standings')
+  getHeadToHeadStandings(@Param('leagueId') leagueId: string) {
+    return this.leaguesService.getHeadToHeadStandings(leagueId);
+  }
+
+  @Get(':leagueId/h2h/fixtures')
+  getHeadToHeadFixtures(@Param('leagueId') leagueId: string) {
+    return this.leaguesService.getHeadToHeadFixturesForLeague(leagueId);
+  }
 }

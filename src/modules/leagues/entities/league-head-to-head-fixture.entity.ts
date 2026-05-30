@@ -32,6 +32,9 @@ export class LeagueHeadToHeadFixtureEntity extends AppBaseEntity {
   @Column({ name: 'is_bye', type: 'boolean', default: false })
   isBye!: boolean;
 
+  @Column({ name: 'is_average', type: 'boolean', default: false })
+  isAverage!: boolean;
+
   @Column({ name: 'notes', type: 'varchar', length: 255, nullable: true })
   notes!: string | null;
 

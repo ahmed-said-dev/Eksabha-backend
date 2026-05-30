@@ -16,7 +16,8 @@ import { CupEntryEntity, CupEntryStatus } from './entities/cup-entry.entity';
 import { CupFixtureEntity, CupFixtureStatus } from './entities/cup-fixture.entity';
 import { CupRoundEntity, CupRoundStatus } from './entities/cup-round.entity';
 import { CupEntity, CupStatus, CupType } from './entities/cup.entity';
-import { LeagueHeadToHeadFixtureEntity } from './entities/league-head-to-head-fixture.entity';
+import { LeagueHeadToHeadFixtureEntity, LeagueHeadToHeadFixtureStatus } from './entities/league-head-to-head-fixture.entity';
+import { LeagueHeadToHeadStandingEntity } from './entities/league-head-to-head-standing.entity';
 import {
   LeagueJoinSource,
   LeagueMembershipEntity,
@@ -48,6 +49,8 @@ export class LeaguesService {
     private readonly leaguePendingEntriesRepository: Repository<LeaguePendingEntryEntity>,
     @InjectRepository(LeagueHeadToHeadFixtureEntity)
     private readonly leagueHeadToHeadFixturesRepository: Repository<LeagueHeadToHeadFixtureEntity>,
+    @InjectRepository(LeagueHeadToHeadStandingEntity)
+    private readonly leagueHeadToHeadStandingsRepository: Repository<LeagueHeadToHeadStandingEntity>,
     @InjectRepository(CupEntity)
     private readonly cupsRepository: Repository<CupEntity>,
     @InjectRepository(CupEntryEntity)
@@ -434,6 +437,13 @@ export class LeaguesService {
       order: { createdAt: 'ASC' },
     });
 
+    const h2hStandings = league.scoringMode === LeagueScoringMode.HEAD_TO_HEAD
+      ? await this.leagueHeadToHeadStandingsRepository.find({
+          where: { league: { id: leagueId } },
+          relations: { membership: { fantasyTeam: true, user: { profile: true } } },
+        })
+      : [];
+
     const h2hFixtures = league.scoringMode === LeagueScoringMode.HEAD_TO_HEAD
       ? await this.leagueHeadToHeadFixturesRepository.find({
           where: { league: { id: leagueId } },
@@ -516,16 +526,40 @@ export class LeaguesService {
         reason: pendingEntry.reason,
       })),
       cups: linkedCups.map((cup) => this.buildCupOverviewCard(cup)),
+      headToHeadStandings: h2hStandings
+        .sort((a, b) => {
+          if (b.leaguePoints !== a.leaguePoints) return b.leaguePoints - a.leaguePoints;
+          const aDiff = a.pointsFor - a.pointsAgainst;
+          const bDiff = b.pointsFor - b.pointsAgainst;
+          if (bDiff !== aDiff) return bDiff - aDiff;
+          return b.pointsFor - a.pointsFor;
+        })
+        .map((standing, index) => ({
+          rank: index + 1,
+          teamName: standing.isAverage ? 'Average' : (standing.membership?.fantasyTeam?.name ?? standing.membership?.entryNameSnapshot ?? 'Unknown'),
+          managerName: standing.isAverage ? null : (standing.membership?.user?.profile?.displayName ?? standing.membership?.managerNameSnapshot ?? null),
+          matchesPlayed: standing.matchesPlayed,
+          wins: standing.wins,
+          draws: standing.draws,
+          losses: standing.losses,
+          pointsFor: standing.pointsFor,
+          pointsAgainst: standing.pointsAgainst,
+          leaguePoints: standing.leaguePoints,
+          isAverage: standing.isAverage,
+          membershipId: standing.membership?.id ?? null,
+          fantasyTeamId: standing.membership?.fantasyTeam?.id ?? null,
+        })),
       headToHeadFixtures: h2hFixtures.map((fixture) => ({
         id: fixture.id,
         roundNumber: fixture.roundNumber,
         matchdayNumber: fixture.matchdayNumber,
         status: fixture.status,
-        homeTeamName: fixture.homeMembership?.fantasyTeam?.name ?? fixture.homeMembership?.entryNameSnapshot ?? null,
-        awayTeamName: fixture.awayMembership?.fantasyTeam?.name ?? fixture.awayMembership?.entryNameSnapshot ?? null,
+        homeTeamName: fixture.isAverage && !fixture.homeMembership ? 'Average' : (fixture.homeMembership?.fantasyTeam?.name ?? fixture.homeMembership?.entryNameSnapshot ?? null),
+        awayTeamName: fixture.isAverage && !fixture.awayMembership ? 'Average' : (fixture.awayMembership?.fantasyTeam?.name ?? fixture.awayMembership?.entryNameSnapshot ?? null),
         homePoints: fixture.homePoints,
         awayPoints: fixture.awayPoints,
         winnerMembershipId: fixture.winnerMembership?.id ?? null,
+        isAverage: fixture.isAverage,
       })),
     };
   }
@@ -1237,12 +1271,522 @@ export class LeaguesService {
       }
     }
 
+    // 4. Auto-lock any unlocked H2H leagues whose start matchday has been reached
+    const unlockedH2HLeagues = await this.leaguesRepository.find({
+      where: {
+        tournament: { id: matchday.tournament.id },
+        scoringMode: LeagueScoringMode.HEAD_TO_HEAD,
+        status: LeagueStatus.OPEN,
+        isJoinLocked: false,
+      },
+    });
+
+    for (const h2hLeague of unlockedH2HLeagues) {
+      const startNumber = h2hLeague.startsFromMatchdayNumber ?? 1;
+      if (matchday.number >= startNumber) {
+        // Auto-lock and generate fixtures
+        await this.generateHeadToHeadFixtures(h2hLeague.id);
+      }
+    }
+
     return {
       matchdayId,
       activatedEntries: pendingEntries.length,
       cupsReviewed: cups.length,
     };
   }
+
+  // ──────────────────────────────────────────────────────────────────────
+  //  Head-to-Head Fixture Generation & Resolution
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Generate round-robin H2H fixtures for a league.
+   * If the team count is odd, an "Average" virtual team is added.
+   * Fixtures are generated for consecutive matchdays starting from `startMatchdayNumber`.
+   */
+  async generateHeadToHeadFixtures(leagueId: string) {
+    const league = await this.leaguesRepository.findOne({
+      where: { id: leagueId },
+      relations: { tournament: true },
+    });
+
+    if (!league) {
+      throw new NotFoundException('League not found.');
+    }
+
+    if (league.scoringMode !== LeagueScoringMode.HEAD_TO_HEAD) {
+      throw new BadRequestException('This league does not use Head-to-Head scoring.');
+    }
+
+    // Delete any existing fixtures for this league
+    await this.leagueHeadToHeadFixturesRepository.delete({ league: { id: leagueId } });
+    // Delete existing standings
+    await this.leagueHeadToHeadStandingsRepository.delete({ league: { id: leagueId } });
+
+    // Load active memberships
+    const activeMemberships = await this.leagueMembershipsRepository.find({
+      where: { league: { id: leagueId }, status: LeagueMembershipStatus.ACTIVE },
+      relations: { fantasyTeam: true, user: { profile: true } },
+      order: { joinedAt: 'ASC' },
+    });
+
+    let teams = [...activeMemberships];
+
+    // If odd number of teams, add Average placeholder
+    const hasAverage = teams.length % 2 !== 0;
+
+    // Determine starting matchday number
+    const tournament = league.tournament;
+    const currentMatchday = tournament ? await this.resolveCurrentMatchday(tournament.id) : null;
+
+    // Start from the next matchday after the current one, or from the league's configured start
+    const startFromNumber = league.startsFromMatchdayNumber
+      ?? (currentMatchday ? currentMatchday.number + 1 : 1);
+
+    // Get all matchdays from the starting point
+    const availableMatchdays = tournament
+      ? await this.matchdaysRepository.find({
+          where: { tournament: { id: tournament.id } },
+          order: { number: 'ASC' },
+        })
+      : [];
+
+    const futureMatchdays = availableMatchdays.filter(
+      (md) => md.number >= startFromNumber,
+    );
+
+    // Round-robin: use circle method
+    const n = hasAverage ? teams.length + 1 : teams.length; // even count for round-robin
+    const totalRounds = n - 1;
+    const matchesPerRound = n / 2;
+
+    if (futureMatchdays.length < totalRounds) {
+      throw new BadRequestException(
+        `Not enough matchdays available. Need ${totalRounds} rounds but only ${futureMatchdays.length} matchdays remaining.`,
+      );
+    }
+
+    const fixtures: LeagueHeadToHeadFixtureEntity[] = [];
+
+    // Circle method for round-robin
+    // Fix the first team, rotate the rest
+    const slots: (LeagueMembershipEntity | null)[] = hasAverage
+      ? [...teams, null] // null = Average team
+      : [...teams];
+
+    for (let round = 0; round < totalRounds; round++) {
+      const matchdayNumber = futureMatchdays[round].number;
+      const matchday = futureMatchdays[round];
+
+      for (let match = 0; match < matchesPerRound; match++) {
+        const homeIdx = match;
+        const awayIdx = n - 1 - match;
+
+        const homeTeam = slots[homeIdx] ?? null;
+        const awayTeam = slots[awayIdx] ?? null;
+
+        // Skip if both are null (shouldn't happen)
+        if (!homeTeam && !awayTeam) {
+          continue;
+        }
+
+        const isAverageFixture = !homeTeam || !awayTeam;
+
+        fixtures.push(
+          this.leagueHeadToHeadFixturesRepository.create({
+            league,
+            roundNumber: round + 1,
+            matchdayNumber,
+            matchday,
+            status: LeagueHeadToHeadFixtureStatus.UPCOMING,
+            homePoints: null,
+            awayPoints: null,
+            homeMembership: homeTeam,
+            awayMembership: awayTeam,
+            winnerMembership: null,
+            isBye: false,
+            isAverage: isAverageFixture,
+            notes: isAverageFixture ? 'Average team' : null,
+          }),
+        );
+      }
+
+      // Rotate: keep first element fixed, rotate the rest
+      const last = slots.pop()!;
+      slots.splice(1, 0, last);
+    }
+
+    await this.leagueHeadToHeadFixturesRepository.save(fixtures);
+
+    // Initialize standings for all real teams
+    const standings = teams.map((membership) =>
+      this.leagueHeadToHeadStandingsRepository.create({
+        league,
+        membership,
+        matchesPlayed: 0,
+        wins: 0,
+        draws: 0,
+        losses: 0,
+        pointsFor: 0,
+        pointsAgainst: 0,
+        leaguePoints: 0,
+        rank: null,
+        isAverage: false,
+      }),
+    );
+
+    // If has average, add Average standing row
+    if (hasAverage) {
+      standings.push(
+        this.leagueHeadToHeadStandingsRepository.create({
+          league,
+          membership: null,
+          matchesPlayed: 0,
+          wins: 0,
+          draws: 0,
+          losses: 0,
+          pointsFor: 0,
+          pointsAgainst: 0,
+          leaguePoints: 0,
+          rank: null,
+          isAverage: true,
+        }),
+      );
+    }
+
+    await this.leagueHeadToHeadStandingsRepository.save(standings);
+
+    // Lock the league from new entries
+    league.isJoinLocked = true;
+    league.status = LeagueStatus.LOCKED;
+    await this.leaguesRepository.save(league);
+
+    return {
+      leagueId: league.id,
+      leagueName: league.name,
+      teamCount: teams.length,
+      hasAverage,
+      totalRounds,
+      startMatchdayNumber: futureMatchdays[0]?.number ?? startFromNumber,
+      fixturesGenerated: fixtures.length,
+    };
+  }
+
+  /**
+   * Resolve H2H fixtures for a specific matchday.
+   * Compares matchday points from leaderboard entries and updates standings (3-1-0).
+   */
+  async resolveHeadToHeadFixturesForMatchday(matchdayId: string) {
+    const matchday = await this.matchdaysRepository.findOne({
+      where: { id: matchdayId },
+      relations: { tournament: true },
+    });
+
+    if (!matchday) {
+      throw new NotFoundException('Matchday not found.');
+    }
+
+    // Load all H2H fixtures for this matchday
+    const fixtures = await this.leagueHeadToHeadFixturesRepository.find({
+      where: { matchdayNumber: matchday.number },
+      relations: {
+        league: true,
+        homeMembership: { fantasyTeam: true },
+        awayMembership: { fantasyTeam: true },
+        winnerMembership: true,
+      },
+    });
+
+    if (fixtures.length === 0) {
+      return { matchdayId, resolved: 0, message: 'No H2H fixtures found for this matchday.' };
+    }
+
+    // Load matchday points from global leaderboard
+    const globalEntries = await this.leaderboardEntriesRepository.find({
+      where: { matchday: { id: matchday.id }, scope: 'global' },
+      relations: { fantasyTeam: true },
+    });
+
+    const matchdayPointsByFantasyTeamId = new Map<string, number>();
+    for (const entry of globalEntries) {
+      if (entry.fantasyTeam) {
+        matchdayPointsByFantasyTeamId.set(entry.fantasyTeam.id, entry.matchdayPoints);
+      }
+    }
+
+    // Calculate the global average score for this matchday
+    const allScores = Array.from(matchdayPointsByFantasyTeamId.values());
+    const averageScore =
+      allScores.length > 0
+        ? Math.round(allScores.reduce((sum, val) => sum + val, 0) / allScores.length)
+        : 0;
+
+    // Get all standings for affected leagues, keyed by leagueId + membershipId
+    const leagueIds = [...new Set(fixtures.map((f) => f.league.id))];
+    const allStandings = await this.leagueHeadToHeadStandingsRepository.find({
+      where: { league: { id: In(leagueIds) } },
+      relations: { membership: true, league: true },
+    });
+
+    const standingsMap = new Map<string, LeagueHeadToHeadStandingEntity>();
+    for (const standing of allStandings) {
+      const key = standing.isAverage
+        ? `${standing.league.id}::AVERAGE`
+        : `${standing.league.id}::${standing.membership?.id}`;
+      standingsMap.set(key, standing);
+    }
+
+    let resolvedCount = 0;
+
+    for (const fixture of fixtures) {
+      if (fixture.status === LeagueHeadToHeadFixtureStatus.FINALIZED) {
+        continue;
+      }
+
+      // Get home and away scores
+      const homeFTeamId = fixture.homeMembership?.fantasyTeam?.id ?? null;
+      const awayFTeamId = fixture.awayMembership?.fantasyTeam?.id ?? null;
+
+      const homeScore = fixture.isAverage && !fixture.homeMembership
+        ? averageScore
+        : homeFTeamId
+          ? (matchdayPointsByFantasyTeamId.get(homeFTeamId) ?? 0)
+          : 0;
+
+      const awayScore = fixture.isAverage && !fixture.awayMembership
+        ? averageScore
+        : awayFTeamId
+          ? (matchdayPointsByFantasyTeamId.get(awayFTeamId) ?? 0)
+          : 0;
+
+      fixture.homePoints = homeScore;
+      fixture.awayPoints = awayScore;
+
+      // Determine winner: 3 pts for win, 1 for draw, 0 for loss
+      let homeLeaguePoints = 0;
+      let awayLeaguePoints = 0;
+      let winnerMembership: LeagueMembershipEntity | null = null;
+
+      if (homeScore > awayScore) {
+        homeLeaguePoints = 3;
+        awayLeaguePoints = 0;
+        winnerMembership = fixture.homeMembership;
+      } else if (awayScore > homeScore) {
+        homeLeaguePoints = 0;
+        awayLeaguePoints = 3;
+        winnerMembership = fixture.awayMembership;
+      } else {
+        // Draw
+        homeLeaguePoints = 1;
+        awayLeaguePoints = 1;
+      }
+
+      fixture.winnerMembership = winnerMembership;
+      fixture.status = LeagueHeadToHeadFixtureStatus.FINALIZED;
+
+      // Update home standing
+      if (fixture.homeMembership) {
+        const homeKey = `${fixture.league.id}::${fixture.homeMembership.id}`;
+        const homeStanding = standingsMap.get(homeKey);
+        if (homeStanding) {
+          homeStanding.matchesPlayed += 1;
+          homeStanding.pointsFor += homeScore;
+          homeStanding.pointsAgainst += awayScore;
+          homeStanding.leaguePoints += homeLeaguePoints;
+          if (homeLeaguePoints === 3) homeStanding.wins += 1;
+          else if (homeLeaguePoints === 1) homeStanding.draws += 1;
+          else homeStanding.losses += 1;
+        }
+      }
+
+      // Update away standing (if not Average)
+      if (fixture.awayMembership) {
+        const awayKey = `${fixture.league.id}::${fixture.awayMembership.id}`;
+        const awayStanding = standingsMap.get(awayKey);
+        if (awayStanding) {
+          awayStanding.matchesPlayed += 1;
+          awayStanding.pointsFor += awayScore;
+          awayStanding.pointsAgainst += homeScore;
+          awayStanding.leaguePoints += awayLeaguePoints;
+          if (awayLeaguePoints === 3) awayStanding.wins += 1;
+          else if (awayLeaguePoints === 1) awayStanding.draws += 1;
+          else awayStanding.losses += 1;
+        }
+      }
+
+      // Update Average standing if this fixture involves Average
+      if (fixture.isAverage) {
+        const avgKey = `${fixture.league.id}::AVERAGE`;
+        const avgStanding = standingsMap.get(avgKey);
+        if (avgStanding) {
+          const avgScore = fixture.isAverage && !fixture.homeMembership ? homeScore : awayScore;
+          const oppScore = fixture.isAverage && !fixture.homeMembership ? awayScore : homeScore;
+          const avgPoints = fixture.isAverage && !fixture.homeMembership ? homeLeaguePoints : awayLeaguePoints;
+
+          avgStanding.matchesPlayed += 1;
+          avgStanding.pointsFor += avgScore;
+          avgStanding.pointsAgainst += oppScore;
+          avgStanding.leaguePoints += avgPoints;
+          if (avgPoints === 3) avgStanding.wins += 1;
+          else if (avgPoints === 1) avgStanding.draws += 1;
+          else avgStanding.losses += 1;
+        }
+      }
+
+      resolvedCount++;
+    }
+
+    // Save all fixtures and standings
+    await this.leagueHeadToHeadFixturesRepository.save(fixtures);
+    const standingsToSave = Array.from(standingsMap.values());
+    await this.leagueHeadToHeadStandingsRepository.save(standingsToSave);
+
+    // Re-rank standings per league
+    for (const leagueId of leagueIds) {
+      const leagueStandings = standingsToSave.filter((s) => s.league.id === leagueId);
+      this.rankHeadToHeadStandings(leagueStandings);
+    }
+
+    await this.leagueHeadToHeadStandingsRepository.save(standingsToSave);
+
+    return {
+      matchdayId,
+      matchdayNumber: matchday.number,
+      averageScore,
+      leaguesResolved: leagueIds.length,
+      fixturesResolved: resolvedCount,
+    };
+  }
+
+  /**
+   * Get H2H standings for a league.
+   */
+  async getHeadToHeadStandings(leagueId: string) {
+    const standings = await this.leagueHeadToHeadStandingsRepository.find({
+      where: { league: { id: leagueId } },
+      relations: { membership: { fantasyTeam: true, user: { profile: true } } },
+      order: { leaguePoints: 'DESC', pointsFor: 'DESC' },
+    });
+
+    return standings.map((standing, index) => ({
+      rank: index + 1,
+      teamName: standing.isAverage
+        ? 'Average'
+        : (standing.membership?.fantasyTeam?.name ?? standing.membership?.entryNameSnapshot ?? 'Unknown'),
+      managerName: standing.isAverage
+        ? null
+        : (standing.membership?.user?.profile?.displayName ?? standing.membership?.managerNameSnapshot ?? null),
+      matchesPlayed: standing.matchesPlayed,
+      wins: standing.wins,
+      draws: standing.draws,
+      losses: standing.losses,
+      pointsFor: standing.pointsFor,
+      pointsAgainst: standing.pointsAgainst,
+      pointsDifference: standing.pointsFor - standing.pointsAgainst,
+      leaguePoints: standing.leaguePoints,
+      isAverage: standing.isAverage,
+      membershipId: standing.membership?.id ?? null,
+      fantasyTeamId: standing.membership?.fantasyTeam?.id ?? null,
+    }));
+  }
+
+  /**
+   * Lock an H2H league and generate its fixtures.
+   * Called when the league should be locked (e.g. after deadline passes).
+   */
+  async lockHeadToHeadLeagueAndGenerateFixtures(leagueId: string) {
+    const league = await this.leaguesRepository.findOne({
+      where: { id: leagueId },
+      relations: { tournament: true },
+    });
+
+    if (!league) {
+      throw new NotFoundException('League not found.');
+    }
+
+    if (league.scoringMode !== LeagueScoringMode.HEAD_TO_HEAD) {
+      throw new BadRequestException('Only Head-to-Head leagues can be locked for fixture generation.');
+    }
+
+    if (league.isJoinLocked && league.status === LeagueStatus.LOCKED) {
+      throw new BadRequestException('League is already locked and fixtures have been generated.');
+    }
+
+    return this.generateHeadToHeadFixtures(leagueId);
+  }
+
+  /**
+   * Rank H2H standings in-place by league points, then points difference, then points for.
+   */
+  private rankHeadToHeadStandings(standings: LeagueHeadToHeadStandingEntity[]) {
+    standings.sort((a, b) => {
+      // Sort by league points (desc)
+      if (b.leaguePoints !== a.leaguePoints) {
+        return b.leaguePoints - a.leaguePoints;
+      }
+      // Then by points difference (desc)
+      const aDiff = a.pointsFor - a.pointsAgainst;
+      const bDiff = b.pointsFor - b.pointsAgainst;
+      if (bDiff !== aDiff) {
+        return bDiff - aDiff;
+      }
+      // Then by points for (desc)
+      if (b.pointsFor !== a.pointsFor) {
+        return b.pointsFor - a.pointsFor;
+      }
+      return 0;
+    });
+
+    standings.forEach((standing, index) => {
+      standing.rank = index + 1;
+    });
+  }
+
+  /**
+   * Get all H2H fixtures for a league.
+   */
+  async getHeadToHeadFixturesForLeague(leagueId: string) {
+    const league = await this.leaguesRepository.findOne({
+      where: { id: leagueId },
+    });
+
+    if (!league) {
+      throw new NotFoundException('League not found.');
+    }
+
+    const fixtures = await this.leagueHeadToHeadFixturesRepository.find({
+      where: { league: { id: leagueId } },
+      relations: {
+        homeMembership: { fantasyTeam: true, user: { profile: true } },
+        awayMembership: { fantasyTeam: true, user: { profile: true } },
+        winnerMembership: { fantasyTeam: true, user: { profile: true } },
+        matchday: true,
+      },
+      order: { roundNumber: 'ASC' },
+    });
+
+    return fixtures.map((fixture) => ({
+      id: fixture.id,
+      roundNumber: fixture.roundNumber,
+      matchdayNumber: fixture.matchdayNumber,
+      status: fixture.status,
+      homeTeamName: fixture.isAverage && !fixture.homeMembership
+        ? 'Average'
+        : (fixture.homeMembership?.fantasyTeam?.name ?? fixture.homeMembership?.entryNameSnapshot ?? null),
+      awayTeamName: fixture.isAverage && !fixture.awayMembership
+        ? 'Average'
+        : (fixture.awayMembership?.fantasyTeam?.name ?? fixture.awayMembership?.entryNameSnapshot ?? null),
+      homePoints: fixture.homePoints,
+      awayPoints: fixture.awayPoints,
+      winnerMembershipId: fixture.winnerMembership?.id ?? null,
+      isAverage: fixture.isAverage,
+      isBye: fixture.isBye,
+      notes: fixture.notes,
+    }));
+  }
+
+  // ── Private Helpers ───────────────────────────────────────────────────
 
   private getCupRoundName(participantCount: number): string {
     if (participantCount <= 2) return 'Final';

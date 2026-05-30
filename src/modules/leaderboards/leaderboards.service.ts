@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 
 import { FantasyTeamEntity } from '../fantasy/entities/fantasy-team.entity';
 import { LeagueMembershipEntity } from '../leagues/entities/league-membership.entity';
+import { LeaguesService } from '../leagues/leagues.service';
 import { PlayerScoreLogEntity } from '../scoring/entities/player-score-log.entity';
 import { MatchdayEntity } from '../tournament/entities/matchday.entity';
 import { LeaderboardEntryEntity } from './entities/leaderboard-entry.entity';
@@ -27,6 +28,7 @@ export class LeaderboardsService {
     private readonly playerScoreLogsRepository: Repository<PlayerScoreLogEntity>,
     @InjectRepository(MatchdayEntity)
     private readonly matchdaysRepository: Repository<MatchdayEntity>,
+    private readonly leaguesService: LeaguesService,
   ) {}
 
   getGlobalLeaderboard(matchday?: string) {
@@ -199,6 +201,13 @@ export class LeaderboardsService {
 
     if (leagueMatchdayEntries.length > 0) {
       await this.leaderboardEntriesRepository.save(leagueMatchdayEntries);
+    }
+
+    // Resolve Head-to-Head league fixtures for this matchday
+    try {
+      await this.leaguesService.resolveHeadToHeadFixturesForMatchday(matchday.id);
+    } catch (error: unknown) {
+      // Don't fail leaderboard materialization if H2H resolution has issues (e.g. no H2H leagues exist)
     }
 
     return {

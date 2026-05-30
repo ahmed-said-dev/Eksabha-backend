@@ -6,6 +6,7 @@ import { UserEntity } from '../../users/entities/user.entity';
 import { CupEntity } from './cup.entity';
 import { LeagueHeadToHeadFixtureEntity } from './league-head-to-head-fixture.entity';
 import { LeagueMembershipEntity } from './league-membership.entity';
+import { LeagueHeadToHeadStandingEntity } from './league-head-to-head-standing.entity';
 import { LeaguePendingEntryEntity } from './league-pending-entry.entity';
 
 export enum LeagueType {
@@ -107,6 +108,9 @@ export class LeagueEntity extends AppBaseEntity {
 
   @OneToMany(() => LeagueHeadToHeadFixtureEntity, (fixture) => fixture.league)
   headToHeadFixtures!: LeagueHeadToHeadFixtureEntity[];
+
+  @OneToMany(() => LeagueHeadToHeadStandingEntity, (standing) => standing.league)
+  headToHeadStandings!: LeagueHeadToHeadStandingEntity[];
 
   @OneToMany(() => CupEntity, (cup) => cup.league)
   cups!: CupEntity[];
