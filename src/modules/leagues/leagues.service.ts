@@ -1003,7 +1003,7 @@ export class LeaguesService {
       status: cup.status,
       leagueId: cup.league?.id ?? null,
       leagueName: cup.league?.name ?? null,
-      joinCode: cup.slug ?? null,
+      joinCode: cup.type === CupType.GENERAL ? (cup.slug ?? null) : null,
       badgeLabel: cup.badgeLabel,
       startMatchdayLabel: cup.startMatchdayNumber ? `GW${cup.startMatchdayNumber}` : null,
       entryCutoffMatchdayNumber: cup.entryCutoffMatchdayNumber,
