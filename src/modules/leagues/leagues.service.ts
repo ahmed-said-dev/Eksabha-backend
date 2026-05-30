@@ -5,15 +5,17 @@ import { In, Repository } from 'typeorm';
 
 import { CreateLeagueDto } from './dto/create-league.dto';
 import { JoinLeagueDto } from './dto/join-league.dto';
+import { CreateCupDto } from './dto/create-cup.dto';
+import { JoinCupDto } from './dto/join-cup.dto';
 import { FantasyTeamEntity } from '../fantasy/entities/fantasy-team.entity';
 import { LeaderboardEntryEntity } from '../leaderboards/entities/leaderboard-entry.entity';
 import { MatchdayEntity, MatchdayStatus } from '../tournament/entities/matchday.entity';
 import { TournamentEntity } from '../tournament/entities/tournament.entity';
 import { UserEntity } from '../users/entities/user.entity';
-import { CupEntryEntity } from './entities/cup-entry.entity';
+import { CupEntryEntity, CupEntryStatus } from './entities/cup-entry.entity';
 import { CupFixtureEntity } from './entities/cup-fixture.entity';
 import { CupRoundEntity } from './entities/cup-round.entity';
-import { CupEntity } from './entities/cup.entity';
+import { CupEntity, CupStatus, CupType } from './entities/cup.entity';
 import { LeagueHeadToHeadFixtureEntity } from './entities/league-head-to-head-fixture.entity';
 import {
   LeagueJoinSource,
@@ -535,6 +537,85 @@ export class LeaguesService {
     return this.joinLeagueEntityForUser(userId, league, LeagueJoinSource.PUBLIC_AUTO);
   }
 
+  async createCupForUser(userId: string, dto: CreateCupDto) {
+    const owner = await this.resolveUserOrThrow(userId);
+    const tournament = await this.resolveTournament(dto.tournamentId);
+    const fantasyTeam = await this.resolveFantasyTeamForUser(userId, tournament?.id ?? null);
+
+    const cup = await this.cupsRepository.save(this.cupsRepository.create({
+      name: dto.name.trim(),
+      slug: dto.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+      type: CupType.GENERAL,
+      status: CupStatus.UPCOMING,
+      description: dto.description?.trim() || null,
+      badgeLabel: 'CUSTOM CUP',
+      startMatchdayNumber: dto.startMatchdayNumber ?? null,
+      entryCutoffMatchdayNumber: dto.entryCutoffMatchdayNumber ?? null,
+      tournament,
+      league: null,
+    }));
+
+    if (fantasyTeam) {
+      const membership = await this.leagueMembershipsRepository.findOne({
+        where: { fantasyTeam: { id: fantasyTeam.id } },
+        relations: { fantasyTeam: true, user: true },
+      });
+
+      if (membership) {
+        await this.cupEntriesRepository.save(this.cupEntriesRepository.create({
+          cup,
+          membership,
+          seedNumber: 1,
+          status: CupEntryStatus.ACTIVE,
+        }));
+      }
+    }
+
+    return this.cupsRepository.findOne({ where: { id: cup.id }, relations: { league: true, tournament: true, entries: { membership: true } } });
+  }
+
+  async joinCupForUser(userId: string, dto: JoinCupDto) {
+    const cup = await this.cupsRepository.findOne({
+      where: { slug: dto.joinCode.trim().toLowerCase() },
+      relations: { tournament: true, entries: { membership: { fantasyTeam: true, user: true } } },
+    });
+
+    if (!cup) {
+      throw new NotFoundException('Cup not found for the provided join code.');
+    }
+
+    const tournament = cup.tournament ?? await this.resolveTournament(null);
+    const fantasyTeam = await this.resolveFantasyTeamForUser(userId, tournament?.id ?? null);
+    if (!fantasyTeam) {
+      throw new NotFoundException('Fantasy team not found for this tournament.');
+    }
+
+    const membership = await this.leagueMembershipsRepository.findOne({
+      where: { fantasyTeam: { id: fantasyTeam.id }, user: { id: userId } },
+      relations: { fantasyTeam: true, user: true },
+    });
+
+    if (!membership) {
+      throw new NotFoundException('League membership not found for this team.');
+    }
+
+    const existingEntry = await this.cupEntriesRepository.findOne({
+      where: { cup: { id: cup.id }, membership: { id: membership.id } },
+      relations: { cup: true, membership: true },
+    });
+
+    if (!existingEntry) {
+      await this.cupEntriesRepository.save(this.cupEntriesRepository.create({
+        cup,
+        membership,
+        seedNumber: null,
+        status: CupEntryStatus.ACTIVE,
+      }));
+    }
+
+    return this.cupsRepository.findOne({ where: { id: cup.id }, relations: { league: true, tournament: true, entries: { membership: true } } });
+  }
+
   private async joinLeagueEntityForUser(userId: string, league: LeagueEntity, joinSource: LeagueJoinSource) {
     const user = await this.resolveUserOrThrow(userId);
 
@@ -797,6 +878,7 @@ export class LeaguesService {
       status: cup.status,
       leagueId: cup.league?.id ?? null,
       leagueName: cup.league?.name ?? null,
+      joinCode: cup.slug ?? null,
       badgeLabel: cup.badgeLabel,
       startMatchdayLabel: cup.startMatchdayNumber ? `GW${cup.startMatchdayNumber}` : null,
       entryCutoffMatchdayNumber: cup.entryCutoffMatchdayNumber,

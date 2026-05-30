@@ -3,7 +3,9 @@ import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/co
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import type { JwtAccessPayload } from '../auth/interfaces/auth-request.interface';
+import { CreateCupDto } from './dto/create-cup.dto';
 import { CreateLeagueDto } from './dto/create-league.dto';
+import { JoinCupDto } from './dto/join-cup.dto';
 import { JoinLeagueDto } from './dto/join-league.dto';
 import { LeaguesService } from './leagues.service';
 
@@ -80,5 +82,17 @@ export class LeaguesController {
   @Post('public/:leagueId/join')
   joinPublicLeague(@CurrentUser() user: JwtAccessPayload, @Param('leagueId') leagueId: string) {
     return this.leaguesService.joinPublicLeagueForUser(user.sub, leagueId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('cups')
+  createCup(@CurrentUser() user: JwtAccessPayload, @Body() dto: CreateCupDto) {
+    return this.leaguesService.createCupForUser(user.sub, dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('cups/join')
+  joinCup(@CurrentUser() user: JwtAccessPayload, @Body() dto: JoinCupDto) {
+    return this.leaguesService.joinCupForUser(user.sub, dto);
   }
 }

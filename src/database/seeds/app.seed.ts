@@ -216,7 +216,7 @@ function buildWorldCupSeedDefinition(): SeedDefinition {
         awayTeamCode: 'FRA',
       },
     ],
-    sampleFantasyTeamName: 'Apex Dream XI',
+    sampleFantasyTeamName: 'Eksabha Dream XI',
     desiredSeedSquad: [
       { playerFrontendId: 'p_bra_1', positionOrder: 1, isCaptain: false, isViceCaptain: false, isBenched: false, multiplier: 1 },
       { playerFrontendId: 'p_fra_2', positionOrder: 2, isCaptain: false, isViceCaptain: false, isBenched: false, multiplier: 1 },
@@ -234,8 +234,8 @@ function buildWorldCupSeedDefinition(): SeedDefinition {
       { playerFrontendId: 'p_ger_3', positionOrder: 14, isCaptain: false, isViceCaptain: false, isBenched: true, multiplier: 1 },
       { playerFrontendId: 'p_arg_3', positionOrder: 15, isCaptain: false, isViceCaptain: false, isBenched: true, multiplier: 1 },
     ],
-    leagueName: 'Apex World Cup Seed League',
-    leagueJoinCode: 'APEX-WC26',
+    leagueName: 'Eksabha World Cup Seed League',
+    leagueJoinCode: 'Eksabha-WC26',
     scoringRuleSetName: 'Default World Cup 2026 Rules',
     scoringRuleSetCode: 'default-world-cup-2026',
     scoringRuleSetDescription: 'Default fantasy scoring rules for the FIFA World Cup 2026 experience.',
@@ -331,7 +331,7 @@ function buildEgyptLeagueSeedDefinition(): SeedDefinition {
         awayTeamCode: 'ISM',
       },
     ],
-    sampleFantasyTeamName: 'Apex Nile XI',
+    sampleFantasyTeamName: 'Eksabha Nile XI',
     desiredSeedSquad: [
       { playerFrontendId: 'p_zamalek_1', positionOrder: 1, isCaptain: false, isViceCaptain: false, isBenched: false, multiplier: 1 },
       { playerFrontendId: 'p_zamalek_2', positionOrder: 2, isCaptain: false, isViceCaptain: false, isBenched: false, multiplier: 1 },
@@ -349,8 +349,8 @@ function buildEgyptLeagueSeedDefinition(): SeedDefinition {
       { playerFrontendId: 'p_ismaily_3', positionOrder: 14, isCaptain: false, isViceCaptain: false, isBenched: true, multiplier: 1 },
       { playerFrontendId: 'p_zamalek_4', positionOrder: 15, isCaptain: false, isViceCaptain: false, isBenched: true, multiplier: 1 },
     ],
-    leagueName: 'Apex Egyptian League',
-    leagueJoinCode: 'APEX-EGY26',
+    leagueName: 'Eksabha Egyptian League',
+    leagueJoinCode: 'Eksabha-EGY26',
     scoringRuleSetName: 'Default Egyptian League Rules',
     scoringRuleSetCode: 'default-egyptian-premier-league',
     scoringRuleSetDescription: 'Default fantasy scoring rules for the Egyptian Premier League experience.',
@@ -710,7 +710,7 @@ export async function runAppSeed(dataSource: DataSource) {
     const profile = await userProfileRepository.save(
       userProfileRepository.create({
         user: sampleUser,
-        displayName: 'Apex Manager',
+        displayName: 'Eksabha Manager',
         teamName: seedDefinition.sampleFantasyTeamName,
         locale: 'en',
         timezone: 'UTC',
@@ -720,7 +720,7 @@ export async function runAppSeed(dataSource: DataSource) {
 
     sampleUser.profile = profile;
   } else {
-    sampleUser.profile.displayName = 'Apex Manager';
+    sampleUser.profile.displayName = 'Eksabha Manager';
     sampleUser.profile.locale = 'en';
     sampleUser.profile.timezone = 'UTC';
     sampleUser.profile.avatarUrl = null;
