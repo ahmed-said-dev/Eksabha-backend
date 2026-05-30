@@ -39,6 +39,11 @@ export class LeaguesController {
     return this.leaguesService.getLeaguesForFantasyTeam(fantasyTeamId);
   }
 
+  @Get('fantasy-team/:fantasyTeamId/cups')
+  getCupsForFantasyTeam(@Param('fantasyTeamId') fantasyTeamId: string) {
+    return this.leaguesService.getCupsForFantasyTeam(fantasyTeamId);
+  }
+
   @Get(':leagueId')
   getLeagueById(@Param('leagueId') leagueId: string) {
     return this.leaguesService.getLeagueById(leagueId);

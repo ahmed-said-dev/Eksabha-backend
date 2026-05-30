@@ -273,6 +273,29 @@ export class LeaguesService {
       }));
   }
 
+  async getCupsForFantasyTeam(fantasyTeamId: string) {
+    const fantasyTeam = await this.fantasyTeamsRepository.findOne({
+      where: { id: fantasyTeamId },
+      relations: { tournament: true },
+    });
+
+    if (!fantasyTeam) {
+      throw new NotFoundException('Fantasy team not found.');
+    }
+
+    const cups = await this.cupsRepository
+      .createQueryBuilder('cup')
+      .leftJoinAndSelect('cup.league', 'league')
+      .leftJoinAndSelect('cup.entries', 'entry')
+      .leftJoinAndSelect('entry.membership', 'membership')
+      .where('(cup.tournament_id = :tournamentId OR cup.tournament_id IS NULL)', { tournamentId: fantasyTeam.tournament.id })
+      .getMany();
+
+    return cups
+      .filter((cup) => !cup.league || cup.entries.some((entry) => entry.membership?.fantasyTeam?.id === fantasyTeamId))
+      .map((cup) => this.buildCupOverviewCard(cup));
+  }
+
   async getLeagues() {
     return this.leaguesRepository.find({
       relations: { owner: { profile: true }, tournament: true },
