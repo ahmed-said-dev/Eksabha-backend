@@ -19,6 +19,7 @@ import { CupFixtureEntity } from '../../modules/leagues/entities/cup-fixture.ent
 import { CupRoundEntity } from '../../modules/leagues/entities/cup-round.entity';
 import { CupEntity } from '../../modules/leagues/entities/cup.entity';
 import { LeagueHeadToHeadFixtureEntity } from '../../modules/leagues/entities/league-head-to-head-fixture.entity';
+import { LeagueHeadToHeadStandingEntity } from '../../modules/leagues/entities/league-head-to-head-standing.entity';
 import { LeagueMembershipEntity } from '../../modules/leagues/entities/league-membership.entity';
 import { LeagueEntity } from '../../modules/leagues/entities/league.entity';
 import { LeaguePendingEntryEntity } from '../../modules/leagues/entities/league-pending-entry.entity';
@@ -60,6 +61,7 @@ export const appEntities = [
   LeagueMembershipEntity,
   LeaguePendingEntryEntity,
   LeagueHeadToHeadFixtureEntity,
+  LeagueHeadToHeadStandingEntity,
   CupEntity,
   CupEntryEntity,
   CupRoundEntity,
