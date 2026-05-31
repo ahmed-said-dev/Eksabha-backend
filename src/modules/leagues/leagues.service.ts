@@ -560,6 +560,8 @@ export class LeaguesService {
         awayPoints: fixture.awayPoints,
         winnerMembershipId: fixture.winnerMembership?.id ?? null,
         isAverage: fixture.isAverage,
+        homeFantasyTeamId: fixture.homeMembership?.fantasyTeam?.id ?? null,
+        awayFantasyTeamId: fixture.awayMembership?.fantasyTeam?.id ?? null,
       })),
     };
   }
