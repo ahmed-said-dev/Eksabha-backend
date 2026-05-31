@@ -10,6 +10,8 @@ import { LeaderboardsModule } from '../leaderboards/leaderboards.module';
 import { LeaderboardEntryEntity } from '../leaderboards/entities/leaderboard-entry.entity';
 import { LeaguesModule } from '../leagues/leagues.module';
 import { LeagueEntity } from '../leagues/entities/league.entity';
+import { LeagueHeadToHeadFixtureEntity } from '../leagues/entities/league-head-to-head-fixture.entity';
+import { LeagueHeadToHeadStandingEntity } from '../leagues/entities/league-head-to-head-standing.entity';
 import { LeagueMembershipEntity } from '../leagues/entities/league-membership.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { NotificationEntity } from '../notifications/entities/notification.entity';
@@ -55,6 +57,8 @@ import { AdminService } from './admin.service';
       PlayerScoreEventEntity,
       PlayerScoreLogEntity,
       LeagueEntity,
+      LeagueHeadToHeadFixtureEntity,
+      LeagueHeadToHeadStandingEntity,
       LeagueMembershipEntity,
       LeaderboardEntryEntity,
       FantasyTeamEntity,
