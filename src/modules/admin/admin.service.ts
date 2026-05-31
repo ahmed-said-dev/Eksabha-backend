@@ -19,7 +19,9 @@ import { UpsertScoringRulesDto } from '../scoring/dto/upsert-scoring-rules.dto';
 import { LeaderboardsService } from '../leaderboards/leaderboards.service';
 import { LeaderboardEntryEntity } from '../leaderboards/entities/leaderboard-entry.entity';
 import { LeagueMembershipEntity, LeagueMembershipRole } from '../leagues/entities/league-membership.entity';
-import { LeagueEntity } from '../leagues/entities/league.entity';
+import { LeagueEntity, LeagueScoringMode } from '../leagues/entities/league.entity';
+import { LeagueHeadToHeadFixtureEntity } from '../leagues/entities/league-head-to-head-fixture.entity';
+import { LeagueHeadToHeadStandingEntity } from '../leagues/entities/league-head-to-head-standing.entity';
 import { LeaguesService } from '../leagues/leagues.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationEntity } from '../notifications/entities/notification.entity';
@@ -94,6 +96,10 @@ export class AdminService {
     private readonly leaguesRepository: Repository<LeagueEntity>,
     @InjectRepository(LeagueMembershipEntity)
     private readonly leagueMembershipsRepository: Repository<LeagueMembershipEntity>,
+    @InjectRepository(LeagueHeadToHeadFixtureEntity)
+    private readonly h2hFixturesRepository: Repository<LeagueHeadToHeadFixtureEntity>,
+    @InjectRepository(LeagueHeadToHeadStandingEntity)
+    private readonly h2hStandingsRepository: Repository<LeagueHeadToHeadStandingEntity>,
     @InjectRepository(LeaderboardEntryEntity)
     private readonly leaderboardEntriesRepository: Repository<LeaderboardEntryEntity>,
     @InjectRepository(FantasyTeamEntity)
@@ -2489,6 +2495,128 @@ export class AdminService {
         availableAt: new Date(updateEndsAtMs).toISOString(),
         forced: Boolean(dto.force),
       },
+    };
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  //  Head-to-Head League Operations (Admin)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Generate H2H fixtures for ALL unlocked H2H leagues.
+   * Called after a deadline passes to set up the head-to-head draws.
+   */
+  async generateAllH2HFixtures(reason?: string, requestedByUserId?: string) {
+    const h2hLeagues = await this.leaguesRepository.find({
+      where: { scoringMode: LeagueScoringMode.HEAD_TO_HEAD },
+      relations: { tournament: true },
+    });
+
+    if (h2hLeagues.length === 0) {
+      return { generated: 0, leagues: [], message: 'No H2H leagues found.' };
+    }
+
+    const results: Array<{
+      leagueId: string;
+      leagueName: string;
+      teamCount: number;
+      totalRounds: number;
+      fixturesGenerated: number;
+      hasAverage: boolean;
+      error?: string;
+    }> = [];
+
+    for (const league of h2hLeagues) {
+      try {
+        const result = await this.leaguesService.generateHeadToHeadFixtures(league.id);
+        results.push(result);
+      } catch (error: unknown) {
+        results.push({
+          leagueId: league.id,
+          leagueName: league.name,
+          teamCount: 0,
+          totalRounds: 0,
+          fixturesGenerated: 0,
+          hasAverage: false,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    }
+
+    const actor = requestedByUserId
+      ? await this.usersRepository.findOne({ where: { id: requestedByUserId } })
+      : null;
+
+    await this.recordAuditLog({
+      actionType: 'h2h_generate_all',
+      targetType: 'h2h_leagues',
+      targetId: 'all',
+      reason: reason ?? 'Admin triggered bulk H2H fixture generation',
+      actor,
+      beforeState: { totalLeagues: h2hLeagues.length },
+      afterState: { results },
+    });
+
+    return {
+      generated: results.filter((r) => !r.error).length,
+      errors: results.filter((r) => r.error).length,
+      leagues: results,
+    };
+  }
+
+  /**
+   * Get H2H leagues status summary for the admin dashboard.
+   */
+  async getH2HLeaguesStatus() {
+    const h2hLeagues = await this.leaguesRepository.find({
+      where: { scoringMode: LeagueScoringMode.HEAD_TO_HEAD },
+      relations: { tournament: true },
+    });
+
+    const leagueIds = h2hLeagues.map((l) => l.id);
+
+    // Get member counts
+    const memberCounts = leagueIds.length > 0
+      ? await this.leagueMembershipsRepository
+          .createQueryBuilder('membership')
+          .select('membership.league_id', 'leagueId')
+          .addSelect('COUNT(*)', 'count')
+          .where('membership.league_id IN (:...ids)', { ids: leagueIds })
+          .andWhere('membership.status = :status', { status: 'active' })
+          .groupBy('membership.league_id')
+          .getRawMany<{ leagueId: string; count: string }>()
+      : [];
+
+    const memberCountMap = new Map(memberCounts.map((m) => [m.leagueId, Number(m.count)]));
+
+    // Get fixture counts per league
+    const fixtureCounts = leagueIds.length > 0
+      ? await this.h2hFixturesRepository
+          .createQueryBuilder('fixture')
+          .select('fixture.league_id', 'leagueId')
+          .addSelect('COUNT(*)', 'count')
+          .addSelect('MAX(fixture.round_number)', 'maxRound')
+          .where('fixture.league_id IN (:...ids)', { ids: leagueIds })
+          .groupBy('fixture.league_id')
+          .getRawMany<{ leagueId: string; count: string; maxRound: string }>()
+      : [];
+
+    const fixtureCountMap = new Map(fixtureCounts.map((f) => [f.leagueId, {
+      count: Number(f.count),
+      maxRound: Number(f.maxRound),
+    }]));
+
+    return {
+      totalH2HLeagues: h2hLeagues.length,
+      leagues: h2hLeagues.map((league) => ({
+        id: league.id,
+        name: league.name,
+        status: league.status,
+        isJoinLocked: league.isJoinLocked,
+        memberCount: memberCountMap.get(league.id) ?? 0,
+        fixturesGenerated: fixtureCountMap.get(league.id)?.count ?? 0,
+        totalRounds: fixtureCountMap.get(league.id)?.maxRound ?? 0,
+      })),
     };
   }
 

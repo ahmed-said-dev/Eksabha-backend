@@ -33,11 +33,15 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { JwtAccessPayload } from '../auth/interfaces/auth-request.interface';
 import { AdminGuard } from '../player-admin/guards/admin.guard';
 import { AdminService } from './admin.service';
+import { LeaguesService } from '../leagues/leagues.service';
 
 @Controller('admin')
 @UseGuards(AdminGuard)
 export class AdminController {
-  constructor(private readonly adminService: AdminService) {}
+  constructor(
+    private readonly adminService: AdminService,
+    private readonly leaguesService: LeaguesService,
+  ) {}
 
   @Get('status')
   getAdminStatus() {
@@ -285,5 +289,26 @@ export class AdminController {
   @Post('deadlines/complete-update')
   completePostDeadlineUpdate(@CurrentUser() user: JwtAccessPayload, @Body() dto: CompletePostDeadlineUpdateDto) {
     return this.adminService.completePostDeadlineUpdate({ ...dto, requestedByUserId: user.sub });
+  }
+
+  // ── Head-to-Head League Operations ──────────────────────────────────────
+
+  @Get('leagues/h2h/status')
+  getH2HLeaguesStatus() {
+    return this.adminService.getH2HLeaguesStatus();
+  }
+
+  @Post('leagues/h2h/generate-all')
+  generateAllH2HFixtures(@CurrentUser() user: JwtAccessPayload, @Body('reason') reason?: string) {
+    return this.adminService.generateAllH2HFixtures(reason, user.sub);
+  }
+
+  @Post('leagues/h2h/resolve-matchday')
+  resolveH2HFixturesForMatchdayAdmin(
+    @CurrentUser() user: JwtAccessPayload,
+    @Body('matchdayId') matchdayId: string,
+    @Body('reason') reason?: string,
+  ) {
+    return this.leaguesService.resolveHeadToHeadFixturesForMatchday(matchdayId);
   }
 }
