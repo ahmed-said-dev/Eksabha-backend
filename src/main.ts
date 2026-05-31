@@ -59,7 +59,7 @@ async function bootstrap() {
       }
 
       const isConfiguredOrigin = configuredCorsOrigins.includes(origin);
-      const isLocalDevelopmentOrigin = nodeEnv === 'development' && isAllowedDevelopmentOrigin(origin);
+      const isLocalDevelopmentOrigin = isAllowedDevelopmentOrigin(origin);
 
       if (isConfiguredOrigin || isLocalDevelopmentOrigin) {
         callback(null, true);
