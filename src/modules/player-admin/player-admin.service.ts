@@ -5,6 +5,7 @@ import { In, Repository } from 'typeorm';
 import { PlayerEntity } from '../catalog/entities/player.entity';
 import { PlayerPriceEntity } from '../catalog/entities/player-price.entity';
 import { TeamEntity } from '../catalog/entities/team.entity';
+import { PlayerPosition } from '../../common/database';
 import { BulkPlayerActionAdminDto } from './dto/bulk-player-action-admin.dto';
 import { BulkPlayerPricesDownloadAdminDto } from './dto/bulk-player-prices-download-admin.dto';
 import { BulkPlayerPricesUploadAdminDto } from './dto/bulk-player-prices-upload-admin.dto';
@@ -326,7 +327,7 @@ export class PlayerAdminService {
       throw new NotFoundException('No matching players were found.');
     }
 
-    const headers = ['playerId', 'name', 'team', 'position', 'currentPrice', 'newPrice'];
+    const headers = ['playerId', 'name', 'team', 'position', 'currentPrice', 'newPrice', 'newPosition'];
     const rows = players.map((player) => [
       player.id,
       this.escapeCsvCell(player.name),
@@ -334,6 +335,7 @@ export class PlayerAdminService {
       this.escapeCsvCell(player.position),
       player.currentPrice,
       player.currentPrice,
+      player.position,
     ]);
 
     const csv = [headers.join(','), ...rows.map((row) => row.join(','))].join('\n');
@@ -356,32 +358,52 @@ export class PlayerAdminService {
     const header = this.parseCsvLine(lines[0]);
     const playerIdIndex = header.findIndex((h) => h.toLowerCase().replace(/[^a-z]/g, '') === 'playerid');
     const newPriceIndex = header.findIndex((h) => h.toLowerCase().replace(/[^a-z]/g, '') === 'newprice');
+    const newPositionIndex = header.findIndex((h) => h.toLowerCase().replace(/[^a-z]/g, '') === 'newposition');
 
-    if (playerIdIndex === -1 || newPriceIndex === -1) {
-      throw new BadRequestException('CSV must contain playerId and newPrice columns.');
+    if (playerIdIndex === -1) {
+      throw new BadRequestException('CSV must contain a playerId column.');
     }
 
-    const updates: Array<{ playerId: string; newPrice: number }> = [];
+    if (newPriceIndex === -1 && newPositionIndex === -1) {
+      throw new BadRequestException('CSV must contain at least one of newPrice or newPosition columns.');
+    }
+
+    type CsvUpdate = { playerId: string; newPrice?: number; newPosition?: string };
+    const updates: CsvUpdate[] = [];
 
     for (let i = 1; i < lines.length; i++) {
       const cells = this.parseCsvLine(lines[i]);
       const playerId = cells[playerIdIndex]?.trim();
-      const priceRaw = cells[newPriceIndex]?.trim();
-
-      if (!playerId || priceRaw === undefined) {
+      if (!playerId) {
         continue;
       }
 
-      const newPrice = Number.parseFloat(priceRaw);
-      if (!Number.isFinite(newPrice) || newPrice < 0) {
-        continue;
+      const update: CsvUpdate = { playerId };
+
+      if (newPriceIndex !== -1) {
+        const priceRaw = cells[newPriceIndex]?.trim();
+        if (priceRaw !== undefined && priceRaw !== '') {
+          const newPrice = Number.parseFloat(priceRaw);
+          if (Number.isFinite(newPrice) && newPrice >= 0) {
+            update.newPrice = newPrice;
+          }
+        }
       }
 
-      updates.push({ playerId, newPrice });
+      if (newPositionIndex !== -1) {
+        const posRaw = cells[newPositionIndex]?.trim();
+        if (posRaw !== undefined && posRaw !== '') {
+          update.newPosition = posRaw.toUpperCase();
+        }
+      }
+
+      if (update.newPrice !== undefined || update.newPosition !== undefined) {
+        updates.push(update);
+      }
     }
 
     if (!updates.length) {
-      throw new BadRequestException('No valid price updates found in the CSV.');
+      throw new BadRequestException('No valid updates found in the CSV.');
     }
 
     const players = await this.playersRepository.find({
@@ -401,13 +423,23 @@ export class PlayerAdminService {
         continue;
       }
 
-      if (!this.hasPriceChanged(player.currentPrice, update.newPrice)) {
-        skippedPlayerIds.push(update.playerId);
-        continue;
+      let hasChanges = false;
+
+      if (update.newPrice !== undefined && this.hasPriceChanged(player.currentPrice, update.newPrice)) {
+        player.currentPrice = update.newPrice.toFixed(2);
+        hasChanges = true;
       }
 
-      player.currentPrice = update.newPrice.toFixed(2);
-      changedPlayers.push(player);
+      if (update.newPosition !== undefined && update.newPosition !== player.position) {
+        player.position = update.newPosition as PlayerPosition;
+        hasChanges = true;
+      }
+
+      if (hasChanges) {
+        changedPlayers.push(player);
+      } else {
+        skippedPlayerIds.push(update.playerId);
+      }
     }
 
     if (!changedPlayers.length) {
@@ -418,7 +450,7 @@ export class PlayerAdminService {
         missing: missingPlayerIds.length,
         missingPlayerIds,
         skippedPlayerIds,
-        message: 'No prices were changed. All values matched existing prices.',
+        message: 'No changes were applied. All values matched existing data.',
       };
     }
 
@@ -432,7 +464,7 @@ export class PlayerAdminService {
           playerPriceRepository,
           player,
           Number.parseFloat(player.currentPrice),
-          dto.reason?.trim() || 'admin_bulk_csv_price_update',
+          dto.reason?.trim() || 'admin_bulk_csv_update',
         );
       }
     });
