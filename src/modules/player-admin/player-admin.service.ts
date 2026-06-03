@@ -326,11 +326,12 @@ export class PlayerAdminService {
       throw new NotFoundException('No matching players were found.');
     }
 
-    const headers = ['playerId', 'name', 'team', 'currentPrice', 'newPrice'];
+    const headers = ['playerId', 'name', 'team', 'position', 'currentPrice', 'newPrice'];
     const rows = players.map((player) => [
       player.id,
       this.escapeCsvCell(player.name),
       this.escapeCsvCell(player.team?.name ?? ''),
+      this.escapeCsvCell(player.position),
       player.currentPrice,
       player.currentPrice,
     ]);
