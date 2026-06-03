@@ -13,6 +13,8 @@ import {
 
 import { AdminGuard } from './guards/admin.guard';
 import { BulkPlayerActionAdminDto } from './dto/bulk-player-action-admin.dto';
+import { BulkPlayerPricesDownloadAdminDto } from './dto/bulk-player-prices-download-admin.dto';
+import { BulkPlayerPricesUploadAdminDto } from './dto/bulk-player-prices-upload-admin.dto';
 import { CreatePlayerAdminDto } from './dto/create-player-admin.dto';
 import { UpdatePlayerAdminDto } from './dto/update-player-admin.dto';
 import { PlayerAdminService } from './player-admin.service';
@@ -59,6 +61,18 @@ export class PlayerAdminController {
   @UseGuards(AdminGuard)
   applyBulkAction(@Body() dto: BulkPlayerActionAdminDto) {
     return this.playerAdminService.applyBulkAction(dto);
+  }
+
+  @Post('players/bulk-prices/download')
+  @UseGuards(AdminGuard)
+  downloadBulkPricesCsv(@Body() dto: BulkPlayerPricesDownloadAdminDto) {
+    return this.playerAdminService.downloadBulkPricesCsv(dto);
+  }
+
+  @Post('players/bulk-prices/upload')
+  @UseGuards(AdminGuard)
+  uploadBulkPricesCsv(@Body() dto: BulkPlayerPricesUploadAdminDto) {
+    return this.playerAdminService.uploadBulkPricesCsv(dto);
   }
 
   @Patch('players/:playerId')

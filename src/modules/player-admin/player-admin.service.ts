@@ -6,6 +6,8 @@ import { PlayerEntity } from '../catalog/entities/player.entity';
 import { PlayerPriceEntity } from '../catalog/entities/player-price.entity';
 import { TeamEntity } from '../catalog/entities/team.entity';
 import { BulkPlayerActionAdminDto } from './dto/bulk-player-action-admin.dto';
+import { BulkPlayerPricesDownloadAdminDto } from './dto/bulk-player-prices-download-admin.dto';
+import { BulkPlayerPricesUploadAdminDto } from './dto/bulk-player-prices-upload-admin.dto';
 import { CreatePlayerAdminDto } from './dto/create-player-admin.dto';
 import { UpdatePlayerAdminDto } from './dto/update-player-admin.dto';
 
@@ -307,6 +309,144 @@ export class PlayerAdminService {
     return { total, active, inactive, injured, suspended, byPosition, byTeam };
   }
 
+  async downloadBulkPricesCsv(dto: BulkPlayerPricesDownloadAdminDto) {
+    const uniquePlayerIds = Array.from(new Set(dto.playerIds.filter(Boolean)));
+
+    if (!uniquePlayerIds.length) {
+      throw new BadRequestException('At least one player id is required.');
+    }
+
+    const players = await this.playersRepository.find({
+      where: { id: In(uniquePlayerIds) },
+      relations: { team: true },
+      order: { name: 'ASC' },
+    });
+
+    if (!players.length) {
+      throw new NotFoundException('No matching players were found.');
+    }
+
+    const headers = ['playerId', 'name', 'team', 'currentPrice', 'newPrice'];
+    const rows = players.map((player) => [
+      player.id,
+      this.escapeCsvCell(player.name),
+      this.escapeCsvCell(player.team?.name ?? ''),
+      player.currentPrice,
+      player.currentPrice,
+    ]);
+
+    const csv = [headers.join(','), ...rows.map((row) => row.join(','))].join('\n');
+
+    return {
+      success: true,
+      filename: `player-prices-${new Date().toISOString().slice(0, 10)}.csv`,
+      csvContent: csv,
+      count: players.length,
+    };
+  }
+
+  async uploadBulkPricesCsv(dto: BulkPlayerPricesUploadAdminDto) {
+    const lines = dto.csvContent.split(/\r?\n/).filter((line) => line.trim().length > 0);
+
+    if (lines.length < 2) {
+      throw new BadRequestException('CSV must contain a header row and at least one data row.');
+    }
+
+    const header = this.parseCsvLine(lines[0]);
+    const playerIdIndex = header.findIndex((h) => h.toLowerCase().replace(/[^a-z]/g, '') === 'playerid');
+    const newPriceIndex = header.findIndex((h) => h.toLowerCase().replace(/[^a-z]/g, '') === 'newprice');
+
+    if (playerIdIndex === -1 || newPriceIndex === -1) {
+      throw new BadRequestException('CSV must contain playerId and newPrice columns.');
+    }
+
+    const updates: Array<{ playerId: string; newPrice: number }> = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const cells = this.parseCsvLine(lines[i]);
+      const playerId = cells[playerIdIndex]?.trim();
+      const priceRaw = cells[newPriceIndex]?.trim();
+
+      if (!playerId || priceRaw === undefined) {
+        continue;
+      }
+
+      const newPrice = Number.parseFloat(priceRaw);
+      if (!Number.isFinite(newPrice) || newPrice < 0) {
+        continue;
+      }
+
+      updates.push({ playerId, newPrice });
+    }
+
+    if (!updates.length) {
+      throw new BadRequestException('No valid price updates found in the CSV.');
+    }
+
+    const players = await this.playersRepository.find({
+      where: { id: In(updates.map((u) => u.playerId)) },
+      relations: { team: true },
+    });
+
+    const playersById = new Map(players.map((p) => [p.id, p]));
+    const missingPlayerIds: string[] = [];
+    const changedPlayers: PlayerEntity[] = [];
+    const skippedPlayerIds: string[] = [];
+
+    for (const update of updates) {
+      const player = playersById.get(update.playerId);
+      if (!player) {
+        missingPlayerIds.push(update.playerId);
+        continue;
+      }
+
+      if (!this.hasPriceChanged(player.currentPrice, update.newPrice)) {
+        skippedPlayerIds.push(update.playerId);
+        continue;
+      }
+
+      player.currentPrice = update.newPrice.toFixed(2);
+      changedPlayers.push(player);
+    }
+
+    if (!changedPlayers.length) {
+      return {
+        success: true,
+        applied: 0,
+        skipped: skippedPlayerIds.length,
+        missing: missingPlayerIds.length,
+        missingPlayerIds,
+        skippedPlayerIds,
+        message: 'No prices were changed. All values matched existing prices.',
+      };
+    }
+
+    await this.playersRepository.manager.transaction(async (manager) => {
+      const playerRepository = manager.getRepository(PlayerEntity);
+      const playerPriceRepository = manager.getRepository(PlayerPriceEntity);
+
+      for (const player of changedPlayers) {
+        await playerRepository.save(player);
+        await this.recordPriceHistory(
+          playerPriceRepository,
+          player,
+          Number.parseFloat(player.currentPrice),
+          dto.reason?.trim() || 'admin_bulk_csv_price_update',
+        );
+      }
+    });
+
+    return {
+      success: true,
+      applied: changedPlayers.length,
+      skipped: skippedPlayerIds.length,
+      missing: missingPlayerIds.length,
+      missingPlayerIds,
+      skippedPlayerIds,
+      updatedPlayerIds: changedPlayers.map((p) => p.id),
+    };
+  }
+
   async deletePlayer(playerId: string): Promise<{ success: boolean; id: string }> {
     const player = await this.playersRepository.findOne({ where: { id: playerId } });
     if (!player) {
@@ -315,6 +455,42 @@ export class PlayerAdminService {
 
     await this.playersRepository.softRemove(player);
     return { success: true, id: playerId };
+  }
+
+  private escapeCsvCell(value: string): string {
+    const safe = value.replace(/"/g, '""');
+    if (safe.includes(',') || safe.includes('\n') || safe.includes('"')) {
+      return `"${safe}"`;
+    }
+    return safe;
+  }
+
+  private parseCsvLine(line: string): string[] {
+    const result: string[] = [];
+    let current = '';
+    let insideQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      const nextChar = line[i + 1];
+
+      if (char === '"') {
+        if (insideQuotes && nextChar === '"') {
+          current += '"';
+          i++;
+        } else {
+          insideQuotes = !insideQuotes;
+        }
+      } else if (char === ',' && !insideQuotes) {
+        result.push(current);
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+
+    result.push(current);
+    return result;
   }
 
   private buildShortName(fullName: string) {
