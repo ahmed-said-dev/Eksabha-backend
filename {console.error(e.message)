@@ -1,0 +1,26 @@
+--- listeners on 4100 ---
+--- excluded tcp port ranges ---
+
+Protocol tcp Port Exclusion Ranges
+
+Start Port    End Port      
+----------    --------      
+      3557        3656      
+      3756        3855      
+      3956        4055      
+      4070        4169      
+      4183        4282      
+      5156        5255      
+      5433        5532      
+      5730        5829      
+      5830        5929      
+      5930        6029      
+      6064        6163      
+     13094       13193      
+     13194       13293      
+     14701       14800      
+     50000       50059     *
+
+* - Administered port exclusions.
+
+--- quick node bind test on 4300 ---

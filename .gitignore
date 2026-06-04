@@ -10,14 +10,6 @@ npm-debug.log*
 .idea/
 .vscode/
 
-# local temp / broken scratch files currently in workspace
-0
-30
-{
-{console.error(e.message)
-JSON.stringify(value
-l.tournament
-
 # runtime artifacts
 sync-fixtures.log
 sync-players.log
