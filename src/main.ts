@@ -1,6 +1,7 @@
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
+import { json } from 'express';
 import helmet from 'helmet';
 
 import { AppModule } from './app.module';
@@ -36,7 +37,11 @@ function isAllowedDevelopmentOrigin(origin: string) {
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, {
+    bodyParser: true,
+    rawBody: false,
+  });
+  app.use(json({ limit: '5mb' }));
   const configService = app.get(ConfigService);
   const nodeEnv = configService.get<string>('NODE_ENV', 'development');
   const port = configService.get<number>('PORT', 4400);
