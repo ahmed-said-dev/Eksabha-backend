@@ -32,7 +32,7 @@ async function main() {
     }
 
     // Reset team
-    team.formationCode = null;
+    team.formationCode = '4-4-2';
     team.picks = [];
     await teamRepo.save(team);
     console.log('Team reset. Now go to build-squad and create a new team.');
