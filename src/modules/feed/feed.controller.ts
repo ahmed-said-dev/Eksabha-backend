@@ -7,6 +7,7 @@ import { FeedSyncAdminDto } from './dto/feed-sync-admin.dto';
 import { IngestFeedPayloadDto } from './dto/ingest-feed-payload.dto';
 import { ProviderMappingQueryDto } from './dto/provider-mapping-query.dto';
 import { SofaFixtureScrapeAdminDto } from './dto/sofa-fixture-scrape-admin.dto';
+import { SofaMatchdayImportAdminDto, SofaMatchdayPreviewAdminDto } from './dto/sofa-matchday-prepare-admin.dto';
 import { SofaTeamPlayersScrapeAdminDto } from './dto/sofa-team-players-scrape-admin.dto';
 import { FeedProcessingStatus } from './entities/raw-feed-payload.entity';
 import { FeedService } from './feed.service';
@@ -95,6 +96,18 @@ export class FeedController {
   @UseGuards(AdminGuard)
   triggerAdminSofaScoreFixtureScrape(@Body() dto: SofaFixtureScrapeAdminDto) {
     return this.feedService.triggerAdminSofaScoreFixtureScrape(dto);
+  }
+
+  @Post('admin/scrape/sofascore/matchday/preview')
+  @UseGuards(AdminGuard)
+  previewAdminSofaScoreMatchday(@Body() dto: SofaMatchdayPreviewAdminDto) {
+    return this.feedService.previewAdminSofaScoreMatchday(dto);
+  }
+
+  @Post('admin/scrape/sofascore/matchday/import')
+  @UseGuards(AdminGuard)
+  importAdminSofaScoreMatchday(@Body() dto: SofaMatchdayImportAdminDto) {
+    return this.feedService.importAdminSofaScoreMatchday(dto);
   }
 
   @Post('admin/scrape/sofascore/players')

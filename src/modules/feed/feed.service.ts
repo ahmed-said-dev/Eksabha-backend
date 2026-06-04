@@ -25,6 +25,7 @@ import {
 import { IngestFeedPayloadDto } from './dto/ingest-feed-payload.dto';
 import { ProviderMappingQueryDto } from './dto/provider-mapping-query.dto';
 import { SofaFixtureScrapeAdminDto } from './dto/sofa-fixture-scrape-admin.dto';
+import { SofaMatchdayImportAdminDto, SofaMatchdayPreviewAdminDto } from './dto/sofa-matchday-prepare-admin.dto';
 import { SofaTeamPlayersScrapeAdminDto } from './dto/sofa-team-players-scrape-admin.dto';
 import { FeedProcessingStatus, RawFeedPayloadEntity } from './entities/raw-feed-payload.entity';
 import { ProviderRouter } from './providers/provider-router';
@@ -43,6 +44,64 @@ type SofaTeamPlayersResponse = {
       position?: string | null;
     };
   }>;
+};
+
+type SofaSeason = {
+  id?: number;
+  name?: string;
+  year?: string;
+};
+
+type SofaRoundEvent = {
+  id?: number;
+  startTimestamp?: number;
+  status?: {
+    type?: string;
+    description?: string;
+  };
+  homeTeam?: {
+    id?: number;
+    name?: string;
+    shortName?: string;
+    nameCode?: string;
+  };
+  awayTeam?: {
+    id?: number;
+    name?: string;
+    shortName?: string;
+    nameCode?: string;
+  };
+  venue?: {
+    name?: string;
+    stadium?: { name?: string };
+    city?: { name?: string };
+  };
+};
+
+type SofaMatchdayPreviewItem = {
+  eventId: number;
+  externalProviderId: string;
+  kickoffAt: string;
+  venue: string;
+  remoteStatus: string;
+  homeTeam: {
+    sofaScoreId: number | null;
+    name: string;
+    localTeamId: string | null;
+    localTeamName: string | null;
+    mappingMethod: 'external_id' | 'name' | null;
+  };
+  awayTeam: {
+    sofaScoreId: number | null;
+    name: string;
+    localTeamId: string | null;
+    localTeamName: string | null;
+    mappingMethod: 'external_id' | 'name' | null;
+  };
+  existingFixtureId: string | null;
+  action: 'create' | 'update';
+  ready: boolean;
+  issues: string[];
 };
 
 @Injectable()
@@ -386,6 +445,187 @@ export class FeedService implements OnModuleDestroy {
     };
   }
 
+  async previewAdminSofaScoreMatchday(dto: SofaMatchdayPreviewAdminDto) {
+    const matchday = await this.getSofaPrepareMatchday(dto.tournamentId, dto.matchdayId);
+    const season = await this.resolveSofaScoreSeason(dto.sofaScoreTournamentId, dto.sofaScoreSeasonId, matchday.tournament.year);
+
+    await this.sofaClient.init();
+    const response = await this.sofaClient.requestJson<{ events?: SofaRoundEvent[] }>(
+      `https://www.sofascore.com/api/v1/unique-tournament/${dto.sofaScoreTournamentId}/season/${season.id}/events/round/${dto.sofaScoreRound}`,
+    );
+    const remoteEvents = (response.events ?? []).filter((event): event is SofaRoundEvent & { id: number } => (
+      typeof event.id === 'number' && Number.isFinite(event.id)
+    ));
+
+    if (remoteEvents.length === 0) {
+      throw new NotFoundException('No SofaScore fixtures were returned for the selected tournament, season, and round.');
+    }
+
+    const [teams, existingFixtures] = await Promise.all([
+      this.teamsRepository.find({
+        where: { tournament: { id: matchday.tournament.id } },
+        relations: { tournament: true, group: true },
+      }),
+      this.fixturesRepository.find({
+        where: { tournament: { id: matchday.tournament.id } },
+        relations: { homeTeam: true, awayTeam: true, matchday: true, tournament: true },
+      }),
+    ]);
+
+    const items = remoteEvents
+      .map((event) => this.buildSofaMatchdayPreviewItem(event, teams, existingFixtures))
+      .sort((left, right) => left.kickoffAt.localeCompare(right.kickoffAt));
+
+    return {
+      mode: 'sofascore_matchday_preview',
+      tournament: {
+        id: matchday.tournament.id,
+        name: matchday.tournament.name,
+      },
+      matchday: {
+        id: matchday.id,
+        number: matchday.number,
+        phase: matchday.phase,
+        status: matchday.status,
+      },
+      source: {
+        sofaScoreTournamentId: dto.sofaScoreTournamentId,
+        sofaScoreSeasonId: season.id,
+        sofaScoreSeasonName: season.name ?? null,
+        sofaScoreRound: dto.sofaScoreRound,
+      },
+      summary: {
+        total: items.length,
+        ready: items.filter((item) => item.ready).length,
+        creates: items.filter((item) => item.ready && item.action === 'create').length,
+        updates: items.filter((item) => item.ready && item.action === 'update').length,
+        blocked: items.filter((item) => !item.ready).length,
+      },
+      items,
+    };
+  }
+
+  async importAdminSofaScoreMatchday(dto: SofaMatchdayImportAdminDto) {
+    if (dto.eventIds.length === 0) {
+      throw new BadRequestException('Select at least one SofaScore fixture to import.');
+    }
+
+    const preview = await this.previewAdminSofaScoreMatchday(dto);
+    const selectedEventIds = new Set(dto.eventIds);
+    const selectedItems = preview.items.filter((item) => selectedEventIds.has(item.eventId));
+    const missingEventIds = dto.eventIds.filter((eventId) => !selectedItems.some((item) => item.eventId === eventId));
+
+    if (missingEventIds.length > 0) {
+      throw new BadRequestException(`Selected SofaScore events were not found in this round: ${missingEventIds.join(', ')}.`);
+    }
+
+    const blockedItems = selectedItems.filter((item) => !item.ready);
+    if (blockedItems.length > 0) {
+      throw new BadRequestException(
+        `Some selected fixtures cannot be imported: ${blockedItems
+          .map((item) => `${item.eventId} (${item.issues.join('; ')})`)
+          .join(', ')}.`,
+      );
+    }
+
+    const [matchday, teams, actor] = await Promise.all([
+      this.getSofaPrepareMatchday(dto.tournamentId, dto.matchdayId),
+      this.teamsRepository.find({
+        where: { tournament: { id: dto.tournamentId } },
+        relations: { tournament: true, group: true },
+      }),
+      dto.requestedByUserId
+        ? this.usersRepository.findOne({ where: { id: dto.requestedByUserId } })
+        : Promise.resolve(null),
+    ]);
+    const teamsById = new Map(teams.map((team) => [team.id, team]));
+    const importedFixtures: FixtureEntity[] = [];
+    let created = 0;
+    let updated = 0;
+
+    for (const item of selectedItems) {
+      const homeTeam = item.homeTeam.localTeamId ? teamsById.get(item.homeTeam.localTeamId) : null;
+      const awayTeam = item.awayTeam.localTeamId ? teamsById.get(item.awayTeam.localTeamId) : null;
+
+      if (!homeTeam || !awayTeam) {
+        throw new BadRequestException(`Local team mapping disappeared while importing SofaScore event ${item.eventId}.`);
+      }
+
+      let fixture = item.existingFixtureId
+        ? await this.fixturesRepository.findOne({
+          where: { id: item.existingFixtureId },
+          relations: { tournament: true, matchday: true, homeTeam: true, awayTeam: true, group: true },
+        })
+        : await this.fixturesRepository.findOne({
+          where: {
+            tournament: { id: matchday.tournament.id },
+            externalProviderId: item.externalProviderId,
+          },
+          relations: { tournament: true, matchday: true, homeTeam: true, awayTeam: true, group: true },
+        });
+
+      if (!fixture) {
+        fixture = this.fixturesRepository.create({
+          tournament: matchday.tournament,
+          matchday,
+          group: homeTeam.group?.id === awayTeam.group?.id ? homeTeam.group ?? null : null,
+          homeTeam,
+          awayTeam,
+          phase: matchday.phase,
+          status: this.mapSofaFixtureStatus(item.remoteStatus),
+          kickoffAt: new Date(item.kickoffAt),
+          venue: item.venue,
+          homeScore: null,
+          awayScore: null,
+          currentMinute: null,
+          externalProviderId: item.externalProviderId,
+          statistics: null,
+          lineups: null,
+        });
+        created += 1;
+      } else {
+        fixture.tournament = matchday.tournament;
+        fixture.matchday = matchday;
+        fixture.homeTeam = homeTeam;
+        fixture.awayTeam = awayTeam;
+        fixture.phase = matchday.phase;
+        fixture.status = this.mapSofaFixtureStatus(item.remoteStatus);
+        fixture.kickoffAt = new Date(item.kickoffAt);
+        fixture.venue = item.venue;
+        fixture.externalProviderId = item.externalProviderId;
+        if (!fixture.group && homeTeam.group?.id === awayTeam.group?.id) {
+          fixture.group = homeTeam.group ?? null;
+        }
+        updated += 1;
+      }
+
+      const savedFixture = await this.fixturesRepository.save(fixture);
+      importedFixtures.push(savedFixture);
+      this.realtimeEventsService.emitFixtureUpdated({
+        fixtureId: savedFixture.id,
+        status: savedFixture.status,
+        homeScore: savedFixture.homeScore,
+        awayScore: savedFixture.awayScore,
+        currentMinute: savedFixture.currentMinute,
+      });
+    }
+
+    return {
+      mode: 'sofascore_matchday_import',
+      actor: actor?.email ?? null,
+      reason: dto.reason ?? 'admin_sofascore_matchday_import',
+      tournamentId: matchday.tournament.id,
+      matchdayId: matchday.id,
+      matchdayNumber: matchday.number,
+      source: preview.source,
+      requested: dto.eventIds.length,
+      created,
+      updated,
+      fixtureIds: importedFixtures.map((fixture) => fixture.id),
+      externalProviderIds: importedFixtures.map((fixture) => fixture.externalProviderId),
+    };
+  }
+
   async triggerAdminSofaScoreTeamPlayersScrape(dto: SofaTeamPlayersScrapeAdminDto) {
     const actor = dto.requestedByUserId
       ? await this.usersRepository.findOne({ where: { id: dto.requestedByUserId } })
@@ -555,6 +795,178 @@ export class FeedService implements OnModuleDestroy {
       leaderboardRefresh,
       result,
     };
+  }
+
+  private async getSofaPrepareMatchday(tournamentId: string, matchdayId: string) {
+    const matchday = await this.matchdaysRepository.findOne({
+      where: { id: matchdayId },
+      relations: { tournament: true },
+    });
+
+    if (!matchday) {
+      throw new NotFoundException('Selected matchday was not found.');
+    }
+
+    if (matchday.tournament.id !== tournamentId) {
+      throw new BadRequestException('Selected matchday does not belong to the selected tournament.');
+    }
+
+    return matchday;
+  }
+
+  private async resolveSofaScoreSeason(
+    sofaScoreTournamentId: number,
+    requestedSeasonId: number | undefined,
+    tournamentYear: number,
+  ): Promise<SofaSeason & { id: number }> {
+    if (requestedSeasonId) {
+      return { id: requestedSeasonId };
+    }
+
+    await this.sofaClient.init();
+    const response = await this.sofaClient.requestJson<{ seasons?: SofaSeason[] }>(
+      `https://www.sofascore.com/api/v1/unique-tournament/${sofaScoreTournamentId}/seasons`,
+    );
+    const seasons = (response.seasons ?? []).filter((season): season is SofaSeason & { id: number } => (
+      typeof season.id === 'number' && Number.isFinite(season.id)
+    ));
+
+    if (seasons.length === 0) {
+      throw new NotFoundException('No SofaScore seasons were found for the selected tournament.');
+    }
+
+    return seasons.find((season) => (
+      season.year === String(tournamentYear)
+      || season.name?.includes(String(tournamentYear))
+    )) ?? seasons[0];
+  }
+
+  private buildSofaMatchdayPreviewItem(
+    event: SofaRoundEvent & { id: number },
+    teams: TeamEntity[],
+    existingFixtures: FixtureEntity[],
+  ): SofaMatchdayPreviewItem {
+    const externalProviderId = `sofa_${event.id}`;
+    const homeMapping = this.resolveSofaLocalTeam(event.homeTeam, teams);
+    const awayMapping = this.resolveSofaLocalTeam(event.awayTeam, teams);
+    const startTimestamp = event.startTimestamp;
+    const hasValidKickoff = typeof startTimestamp === 'number' && Number.isFinite(startTimestamp) && startTimestamp > 0;
+    const kickoffAt = hasValidKickoff ? new Date(startTimestamp * 1_000) : new Date(0);
+    const remoteStatus = event.status?.type ?? event.status?.description ?? 'notstarted';
+    const issues: string[] = [];
+
+    if (!homeMapping.team) {
+      issues.push(`Home team "${event.homeTeam?.name ?? 'Unknown'}" is not mapped.`);
+    }
+    if (!awayMapping.team) {
+      issues.push(`Away team "${event.awayTeam?.name ?? 'Unknown'}" is not mapped.`);
+    }
+    if (homeMapping.team?.id && homeMapping.team.id === awayMapping.team?.id) {
+      issues.push('Home and away teams resolve to the same local team.');
+    }
+    if (!hasValidKickoff) {
+      issues.push('Kickoff time is missing or invalid.');
+    }
+    if (hasValidKickoff && kickoffAt.getTime() <= Date.now()) {
+      issues.push('Kickoff time has already passed.');
+    }
+    if (!this.isSofaFixturePreStart(remoteStatus)) {
+      issues.push(`SofaScore event status is "${remoteStatus}", not pre-match.`);
+    }
+
+    const existingFixture = existingFixtures.find((fixture) => fixture.externalProviderId === externalProviderId)
+      ?? (
+        homeMapping.team && awayMapping.team && hasValidKickoff
+          ? existingFixtures.find((fixture) => (
+            fixture.homeTeam.id === homeMapping.team!.id
+            && fixture.awayTeam.id === awayMapping.team!.id
+            && Math.abs(fixture.kickoffAt.getTime() - kickoffAt.getTime()) <= 12 * 60 * 60 * 1_000
+          ))
+          : null
+      );
+    const venue = event.venue?.name?.trim()
+      || event.venue?.stadium?.name?.trim()
+      || event.venue?.city?.name?.trim()
+      || 'TBD';
+
+    return {
+      eventId: event.id,
+      externalProviderId,
+      kickoffAt: kickoffAt.toISOString(),
+      venue,
+      remoteStatus,
+      homeTeam: {
+        sofaScoreId: event.homeTeam?.id ?? null,
+        name: event.homeTeam?.name?.trim() || 'Unknown home team',
+        localTeamId: homeMapping.team?.id ?? null,
+        localTeamName: homeMapping.team?.name ?? null,
+        mappingMethod: homeMapping.method,
+      },
+      awayTeam: {
+        sofaScoreId: event.awayTeam?.id ?? null,
+        name: event.awayTeam?.name?.trim() || 'Unknown away team',
+        localTeamId: awayMapping.team?.id ?? null,
+        localTeamName: awayMapping.team?.name ?? null,
+        mappingMethod: awayMapping.method,
+      },
+      existingFixtureId: existingFixture?.id ?? null,
+      action: existingFixture ? 'update' : 'create',
+      ready: issues.length === 0,
+      issues,
+    };
+  }
+
+  private resolveSofaLocalTeam(
+    remoteTeam: SofaRoundEvent['homeTeam'] | SofaRoundEvent['awayTeam'],
+    teams: TeamEntity[],
+  ): { team: TeamEntity | null; method: 'external_id' | 'name' | null } {
+    const remoteId = typeof remoteTeam?.id === 'number' ? String(remoteTeam.id) : null;
+    if (remoteId) {
+      const byExternalId = teams.find((team) => {
+        const externalId = team.externalProviderId?.trim().replace(/^sofa_/i, '') ?? null;
+        return externalId === remoteId;
+      });
+
+      if (byExternalId) {
+        return { team: byExternalId, method: 'external_id' };
+      }
+    }
+
+    const remoteNames = [remoteTeam?.name, remoteTeam?.shortName, remoteTeam?.nameCode]
+      .map((value) => this.normalizeLookup(value))
+      .filter(Boolean);
+    const byName = teams.find((team) => {
+      const localNames = [team.name, team.shortName, team.code]
+        .map((value) => this.normalizeLookup(value))
+        .filter(Boolean);
+      return remoteNames.some((remoteName) => localNames.includes(remoteName));
+    });
+
+    return byName
+      ? { team: byName, method: 'name' }
+      : { team: null, method: null };
+  }
+
+  private isSofaFixturePreStart(remoteStatus: string) {
+    const normalized = remoteStatus.toLowerCase();
+    return ['notstarted', 'scheduled', 'postponed'].includes(normalized);
+  }
+
+  private mapSofaFixtureStatus(remoteStatus: string) {
+    const normalized = remoteStatus.toLowerCase();
+    if (normalized === 'postponed' || normalized === 'canceled' || normalized === 'cancelled') {
+      return FixtureStatus.POSTPONED;
+    }
+    if (normalized === 'inprogress' || normalized === 'live') {
+      return FixtureStatus.LIVE;
+    }
+    if (normalized === 'halftime' || normalized === 'half_time') {
+      return FixtureStatus.HALF_TIME;
+    }
+    if (normalized === 'finished' || normalized === 'full_time') {
+      return FixtureStatus.FULL_TIME;
+    }
+    return FixtureStatus.SCHEDULED;
   }
 
   private isEgyptianPremierLeagueMatchday(fixtures: FixtureEntity[]) {
