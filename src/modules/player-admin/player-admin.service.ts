@@ -8,6 +8,7 @@ import { TeamEntity } from '../catalog/entities/team.entity';
 import { PlayerPosition } from '../../common/database';
 import { BulkPlayerActionAdminDto } from './dto/bulk-player-action-admin.dto';
 import { BulkPlayerPricesDownloadAdminDto } from './dto/bulk-player-prices-download-admin.dto';
+import { BulkPlayerJsonUploadAdminDto } from './dto/bulk-player-json-upload-admin.dto';
 import { BulkPlayerPricesUploadAdminDto } from './dto/bulk-player-prices-upload-admin.dto';
 import { CreatePlayerAdminDto } from './dto/create-player-admin.dto';
 import { UpdatePlayerAdminDto } from './dto/update-player-admin.dto';
@@ -477,6 +478,113 @@ export class PlayerAdminService {
       missingPlayerIds,
       skippedPlayerIds,
       updatedPlayerIds: changedPlayers.map((p) => p.id),
+    };
+  }
+
+  async uploadBulkJson(dto: BulkPlayerJsonUploadAdminDto) {
+    let parsed: Array<{
+      id: number;
+      firstName: string;
+      lastName: string;
+      knownName: string | null;
+      squadId: number;
+      position: string;
+      price: number;
+      status: string;
+    }>;
+
+    try {
+      parsed = JSON.parse(dto.jsonContent);
+    } catch {
+      throw new BadRequestException('Invalid JSON format.');
+    }
+
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      throw new BadRequestException('JSON must be a non-empty array of players.');
+    }
+
+    const SQUAD_TO_TEAM: Record<number, string> = {
+      1: 'ALG', 2: 'ARG', 3: 'AUS', 4: 'AUT', 5: 'BEL', 6: 'BIH',
+      7: 'BRA', 8: 'CPV', 9: 'CAN', 10: 'COL', 11: 'COD', 12: 'CIV',
+      13: 'CRO', 14: 'CUW', 15: 'CZE', 16: 'ECU', 17: 'EGY', 18: 'ENG',
+      19: 'FRA', 20: 'GER', 21: 'GHA', 22: 'HAI', 23: 'IRN', 24: 'IRQ',
+      25: 'JPN', 26: 'JOR', 27: 'KOR', 28: 'MEX', 29: 'MAR', 30: 'NED',
+      31: 'NZL', 32: 'NOR', 33: 'PAN', 34: 'PAR', 35: 'POR', 36: 'QAT',
+      37: 'KSA', 38: 'SCO', 39: 'SEN', 40: 'RSA', 41: 'ESP', 42: 'SWE',
+      43: 'SUI', 44: 'TUN', 45: 'TUR', 46: 'URU', 47: 'USA', 48: 'UZB',
+    };
+
+    const allTeams = await this.teamsRepository.find({
+      where: { tournament: { competitionKey: ADMIN_DASHBOARD_COMPETITION_KEY } },
+    });
+    const teamsByCode = new Map(allTeams.map((t) => [t.code, t]));
+
+    let created = 0;
+    let updated = 0;
+    let deactivated = 0;
+    const skippedCodes = new Set<string>();
+
+    // Group by squadId
+    const bySquad = new Map<number, typeof parsed>();
+    for (const p of parsed) {
+      const list = bySquad.get(p.squadId) ?? [];
+      list.push(p);
+      bySquad.set(p.squadId, list);
+    }
+
+    for (const [squadId, squadPlayers] of bySquad) {
+      const teamCode = SQUAD_TO_TEAM[squadId];
+      if (!teamCode) { skippedCodes.add(String(squadId)); continue; }
+      const dbTeam = teamsByCode.get(teamCode);
+      if (!dbTeam) { skippedCodes.add(teamCode); continue; }
+
+      const jsonExternalIds = new Set(squadPlayers.map((p) => String(p.id)));
+      const existing = await this.playersRepository.find({ where: { team: { id: dbTeam.id } } });
+      const byExtId = new Map(existing.filter((p) => p.externalProviderId).map((p) => [p.externalProviderId!, p]));
+
+      for (const jp of squadPlayers) {
+        const extId = String(jp.id);
+        let player = byExtId.get(extId);
+        const isNew = !player;
+
+        if (isNew) {
+          player = this.playersRepository.create();
+          player.team = dbTeam;
+          player.minutesPlayed = 0;
+          player.totalPoints = 0;
+          created += 1;
+        } else {
+          updated += 1;
+        }
+
+        const name = `${jp.firstName.trim()} ${jp.lastName.trim()}`.trim();
+        const short = jp.knownName?.trim() || name.split(' ').filter(Boolean).length > 1
+          ? `${name.split(' ')[0][0]}. ${name.split(' ').filter(Boolean).pop()}`.slice(0, 80)
+          : name.slice(0, 80);
+
+        player!.name = name;
+        player!.shortName = short;
+        player!.position = jp.position.toUpperCase() as PlayerPosition;
+        player!.externalProviderId = extId;
+        player!.currentPrice = jp.price.toFixed(2);
+        player!.isActive = true;
+        player!.isInjured = false;
+        player!.isSuspended = false;
+
+        await this.playersRepository.save(player!);
+      }
+
+      for (const ep of existing) {
+        if (ep.externalProviderId && jsonExternalIds.has(ep.externalProviderId)) continue;
+        if (ep.isActive) { ep.isActive = false; await this.playersRepository.save(ep); deactivated += 1; }
+      }
+    }
+
+    return {
+      success: true,
+      created, updated, deactivated,
+      skippedTeams: [...skippedCodes],
+      totalInJson: parsed.length,
     };
   }
 
