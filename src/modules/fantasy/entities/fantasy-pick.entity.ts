@@ -1,6 +1,7 @@
 import { Column, Entity, JoinColumn, ManyToOne } from 'typeorm';
 
 import { AppBaseEntity } from '../../../common/database';
+import { PlayerPosition } from '../../../common/database/enums/player-position.enum';
 import { PlayerEntity } from '../../catalog/entities/player.entity';
 import { FantasyTeamEntity } from './fantasy-team.entity';
 
@@ -29,6 +30,9 @@ export class FantasyPickEntity extends AppBaseEntity {
 
   @Column({ name: 'live_points', type: 'int', nullable: true })
   livePoints!: number | null;
+
+  @Column({ name: 'player_position', type: 'varchar', nullable: true })
+  playerPosition!: PlayerPosition | null;
 
   @ManyToOne(() => FantasyTeamEntity, (fantasyTeam) => fantasyTeam.picks, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'fantasy_team_id' })

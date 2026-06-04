@@ -499,6 +499,19 @@ export class PlayerAdminService {
       throw new BadRequestException('Invalid JSON format.');
     }
 
+    try {
+      return await this.processBulkJsonImport(parsed);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new BadRequestException(`JSON import failed: ${message}`);
+    }
+  }
+
+  private async processBulkJsonImport(parsed: Array<{
+    id: number; firstName: string; lastName: string; knownName: string | null;
+    squadId: number; position: string; price: number; status: string;
+  }>) {
+
     if (!Array.isArray(parsed) || parsed.length === 0) {
       throw new BadRequestException('JSON must be a non-empty array of players.');
     }
@@ -557,10 +570,16 @@ export class PlayerAdminService {
           updated += 1;
         }
 
-        const name = `${jp.firstName.trim()} ${jp.lastName.trim()}`.trim();
-        const short = jp.knownName?.trim() || name.split(' ').filter(Boolean).length > 1
-          ? `${name.split(' ')[0][0]}. ${name.split(' ').filter(Boolean).pop()}`.slice(0, 80)
-          : name.slice(0, 80);
+        const name = `${jp.firstName?.trim() ?? ''} ${jp.lastName?.trim() ?? ''}`.trim() || `Player ${jp.id}`;
+        const nameParts = name.split(' ').filter(Boolean);
+        let short = jp.knownName?.trim() || '';
+        if (!short) {
+          if (nameParts.length > 1) {
+            short = `${nameParts[0][0]}. ${nameParts[nameParts.length - 1]}`;
+          } else {
+            short = name;
+          }
+        }
 
         player!.name = name;
         player!.shortName = short;

@@ -497,10 +497,10 @@ export class FantasyService {
     }
 
     const captainPick = syncedFantasyTeam.picks.find(
-      (pick) => pick.player.id === dto.captainPlayerId,
+      (pick) => pick.player?.id === dto.captainPlayerId,
     );
     const viceCaptainPick = syncedFantasyTeam.picks.find(
-      (pick) => pick.player.id === dto.viceCaptainPlayerId,
+      (pick) => pick.player?.id === dto.viceCaptainPlayerId,
     );
 
     if (!captainPick || !viceCaptainPick) {
@@ -515,8 +515,8 @@ export class FantasyService {
       const captainMultiplier = this.getCaptainMultiplier(syncedFantasyTeam.activeChipType);
 
       for (const pick of syncedFantasyTeam.picks) {
-        pick.isCaptain = pick.player.id === dto.captainPlayerId;
-        pick.isViceCaptain = pick.player.id === dto.viceCaptainPlayerId;
+        pick.isCaptain = pick.player?.id === dto.captainPlayerId;
+        pick.isViceCaptain = pick.player?.id === dto.viceCaptainPlayerId;
         pick.multiplier = pick.isCaptain ? captainMultiplier : 1;
         await this.fantasyPicksRepository.save(pick);
       }
@@ -617,6 +617,7 @@ export class FantasyService {
     try {
       const playerOut = outgoingPick.player;
       outgoingPick.player = incomingPlayer;
+      outgoingPick.playerPosition = incomingPlayer.position;
       outgoingPick.buyPrice = incomingPlayer.currentPrice;
       outgoingPick.sellPrice = incomingPlayer.currentPrice;
       await this.fantasyPicksRepository.save(outgoingPick);
@@ -1001,7 +1002,7 @@ export class FantasyService {
       throw new BadRequestException('Player in and player out cannot be the same.');
     }
 
-    const outgoingPick = fantasyTeam.picks.find((pick) => pick.player?.id === dto.playerOutId);
+    const outgoingPick = fantasyTeam.picks.find((pick) => pick.playerId === dto.playerOutId);
     if (!outgoingPick) {
       throw new NotFoundException('The outgoing player is not part of this fantasy team.');
     }
@@ -1030,27 +1031,27 @@ export class FantasyService {
       throw new BadRequestException('Incoming player already exists in the fantasy team.');
     }
 
-    if (!outgoingPick.player) {
-      throw new BadRequestException('The outgoing squad slot does not currently have a valid player assigned.');
+    const outgoingPosition = outgoingPick.player?.position ?? outgoingPick.playerPosition;
+    if (!outgoingPosition) {
+      throw new BadRequestException('The outgoing squad slot does not currently have a valid position assigned.');
     }
 
-    if (incomingPlayer.position !== outgoingPick.player.position) {
+    if (incomingPlayer.position !== outgoingPosition) {
       throw new BadRequestException('Transfers must be made between players in the same position.');
     }
 
     const nextSquadCounts = this.countSquadPositions(
       fantasyTeam.picks.map((pick) =>
-        pick.player?.id === outgoingPick.player.id ? incomingPlayer.position : pick.player?.position,
+        pick.id === outgoingPick.id ? incomingPlayer.position : (pick.player?.position ?? pick.playerPosition),
       ),
     );
     this.ensureFullSquadPositionCounts(nextSquadCounts);
 
-    const nextTeamIds = fantasyTeam.picks.map((pick) =>
-      pick.player?.id === outgoingPick.player.id ? incomingPlayer.team.id : pick.player?.team?.id,
-    );
-    if (nextTeamIds.some((teamId) => !teamId)) {
-      throw new BadRequestException('Fantasy team contains a player without a valid team assignment. Refresh the squad and try again.');
-    }
+    const nextTeamIds = fantasyTeam.picks
+      .filter((pick) => pick.id !== outgoingPick.id)
+      .map((pick) => pick.player?.team?.id ?? null)
+      .filter((teamId): teamId is string => teamId !== null);
+    nextTeamIds.push(incomingPlayer.team.id);
     this.ensureTeamLimit(nextTeamIds);
 
     const currentBudget = Number.parseFloat(fantasyTeam.budgetRemaining);
@@ -1082,34 +1083,8 @@ export class FantasyService {
   }
 
   private async hydrateMissingPlayersOnPicks(picks: FantasyPickEntity[]) {
-    const missingPlayerIds = Array.from(new Set(
-      picks
-        .filter((pick) => !pick.player && pick.playerId)
-        .map((pick) => pick.playerId),
-    ));
-
-    if (missingPlayerIds.length === 0) {
-      return picks;
-    }
-
-    const deletedPlayers = await this.playersRepository
-      .createQueryBuilder('player')
-      .withDeleted()
-      .leftJoinAndSelect('player.team', 'team')
-      .where('player.id IN (:...playerIds)', { playerIds: missingPlayerIds })
-      .getMany();
-
-    const playersById = new Map(deletedPlayers.map((player) => [player.id, player]));
-
-    for (const pick of picks) {
-      if (!pick.player && pick.playerId) {
-        const restoredPlayer = playersById.get(pick.playerId);
-        if (restoredPlayer) {
-          pick.player = restoredPlayer;
-        }
-      }
-    }
-
+    // Intentionally no longer hydrates soft-deleted players.
+    // Deleted players are shown as blank slots in the client using pick.playerPosition.
     return picks;
   }
 
@@ -1144,13 +1119,13 @@ export class FantasyService {
 
     const nextPlayerIds = new Set(nextPicks.map((pick) => pick.playerId));
     const stalePicks = fantasyTeam.picks.filter(
-      (existingPick) => !nextPlayerIds.has(existingPick.player.id),
+      (existingPick) => !existingPick.player || !nextPlayerIds.has(existingPick.player.id),
     );
 
     if (stalePicks.length > 0) {
       await this.fantasyPicksRepository.delete(stalePicks.map((pick) => pick.id));
       fantasyTeam.picks = fantasyTeam.picks.filter(
-        (existingPick) => nextPlayerIds.has(existingPick.player.id),
+        (existingPick) => existingPick.player && nextPlayerIds.has(existingPick.player.id),
       );
     }
 
@@ -1174,7 +1149,7 @@ export class FantasyService {
     playerId: string,
     positionOrder: number,
   ) {
-    const existingPick = fantasyTeam.picks.find((pick) => pick.player.id === playerId);
+    const existingPick = fantasyTeam.picks.find((pick) => pick.playerId === playerId);
     if (existingPick) {
       return existingPick;
     }
@@ -1187,6 +1162,7 @@ export class FantasyService {
     const newPick = this.fantasyPicksRepository.create({
       fantasyTeam,
       player,
+      playerPosition: player.position,
       buyPrice: player.currentPrice,
       sellPrice: player.currentPrice,
       livePoints: 0,
