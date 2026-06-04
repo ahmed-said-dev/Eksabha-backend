@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
@@ -21,6 +21,8 @@ import { UserEntity } from './entities/user.entity';
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     @InjectRepository(UserEntity)
     private readonly usersRepository: Repository<UserEntity>,
@@ -95,31 +97,34 @@ export class UsersService {
       throw new NotFoundException('This app only supports FIFA World Cup fantasy data.');
     }
 
-    const currentMatchday = await this.matchdaysRepository.findOne({
-      where: {
-        tournament: { id: fantasyTeam.tournament.id },
-        number: fantasyTeam.tournament.currentMatchdayNumber,
-      },
+    const tournamentMatchdays = await this.matchdaysRepository.find({
+      where: { tournament: { id: fantasyTeam.tournament.id } },
       relations: { tournament: true },
+      order: { number: 'ASC' },
     });
+    const currentMatchday = tournamentMatchdays.find((matchday) => (
+      matchday.number === fantasyTeam.tournament.currentMatchdayNumber
+    )) ?? tournamentMatchdays.find((matchday) => matchday.status === 'live')
+      ?? tournamentMatchdays.find((matchday) => matchday.status === 'open' || matchday.status === 'locked')
+      ?? tournamentMatchdays.at(-1);
 
     if (!currentMatchday) {
       throw new NotFoundException('Current matchday not found.');
     }
 
     const [overallEntry, matchdayEntry, totalPlayers, totalTransfers, gameweekTransfers, leagueTablesEntriesCount, transfersMade, leagueMemberships] = await Promise.all([
-      this.getLeaderboardEntry(fantasyTeam.id),
-      this.getLeaderboardEntry(fantasyTeam.id, currentMatchday.id),
-      this.fantasyTeamsRepository.count({ where: { tournament: { id: fantasyTeam.tournament.id } } }),
-      this.transfersRepository.count({ where: { fantasyTeam: { id: fantasyTeam.id } } }),
-      this.transfersRepository.count({ where: { fantasyTeam: { id: fantasyTeam.id }, matchday: { id: currentMatchday.id } } }),
-      this.leaderboardEntriesRepository
+      this.safeOverviewQuery('overall leaderboard entry', this.getLeaderboardEntry(fantasyTeam.id), null),
+      this.safeOverviewQuery('matchday leaderboard entry', this.getLeaderboardEntry(fantasyTeam.id, currentMatchday.id), null),
+      this.safeOverviewQuery('total players', this.fantasyTeamsRepository.count({ where: { tournament: { id: fantasyTeam.tournament.id } } }), 0),
+      this.safeOverviewQuery('total transfers', this.transfersRepository.count({ where: { fantasyTeam: { id: fantasyTeam.id } } }), 0),
+      this.safeOverviewQuery('gameweek transfers', this.transfersRepository.count({ where: { fantasyTeam: { id: fantasyTeam.id }, matchday: { id: currentMatchday.id } } }), 0),
+      this.safeOverviewQuery('league tables status', this.leaderboardEntriesRepository
         .createQueryBuilder('entry')
         .where('entry.scope = :scope', { scope: 'league' })
         .andWhere('entry.matchday_id = :matchdayId', { matchdayId: currentMatchday.id })
-        .getCount(),
-      this.transfersRepository.count({ where: { matchday: { id: currentMatchday.id } } }),
-      this.leagueMembershipsRepository.find({ where: { user: { id: userId } }, relations: { league: true } }),
+        .getCount(), 0),
+      this.safeOverviewQuery('matchday transfers count', this.transfersRepository.count({ where: { matchday: { id: currentMatchday.id } } }), 0),
+      this.safeOverviewQuery('league memberships', this.leagueMembershipsRepository.find({ where: { user: { id: userId } }, relations: { league: true } }), []),
     ]);
 
     const livePointsByPlayerId = new Map<string, number>();
@@ -133,15 +138,17 @@ export class UsersService {
     const liveOverallRank = matchdayEntry?.rank ?? overallEntry?.rank ?? null;
     const rankDelta = overallEntry?.previousRank && liveOverallRank ? overallEntry.previousRank - liveOverallRank : 0;
     const primaryLeague = leagueMemberships[0]?.league ?? null;
-    const liveLeagueEntry = primaryLeague ? await this.leaderboardEntriesRepository.findOne({
-      where: {
-        scope: 'league',
-        league: { id: primaryLeague.id },
-        fantasyTeam: { id: fantasyTeam.id },
-        matchday: { id: currentMatchday.id },
-      },
-      relations: { league: true, fantasyTeam: true, matchday: true },
-    }) : null;
+    const liveLeagueEntry = primaryLeague
+      ? await this.safeOverviewQuery('live league entry', this.leaderboardEntriesRepository.findOne({
+        where: {
+          scope: 'league',
+          league: { id: primaryLeague.id },
+          fantasyTeam: { id: fantasyTeam.id },
+          matchday: { id: currentMatchday.id },
+        },
+        relations: { league: true, fantasyTeam: true, matchday: true },
+      }), null)
+      : null;
 
     const pointsToNextRival = liveLeagueEntry?.rank && liveLeagueEntry.rank > 1
       ? 0
@@ -152,12 +159,12 @@ export class UsersService {
       .sort((left, right) => (right.livePoints ?? 0) - (left.livePoints ?? 0))[0]?.player?.shortName ?? null;
 
     const [fixtures, scoreLogs, matchdaySummaryEntries, mostSelected, mostCaptained, mostViceCaptained, gameweekHistory, topTransfersIn, topTransfersOut, topPlayersByMatchday, mostValuableTeams, bestLeagues, latestIssues, newlyAddedPlayers, recentTransfers, setPieceCandidates, teamOfTheWeek, teamOfTheTournament, wildcardCount, benchBoostCount, freeHitCount, tripleCaptainCount] = await Promise.all([
-      this.fixturesRepository.find({
+      this.safeOverviewQuery('matchday fixtures', this.fixturesRepository.find({
         where: { matchday: { id: currentMatchday.id } },
         relations: { homeTeam: true, awayTeam: true },
         order: { kickoffAt: 'ASC' },
-      }),
-      this.playerScoreLogsRepository
+      }), []),
+      this.safeOverviewQuery('matchday score logs', this.playerScoreLogsRepository
         .createQueryBuilder('scoreLog')
         .leftJoinAndSelect('scoreLog.fixture', 'fixture')
         .innerJoinAndSelect('scoreLog.player', 'player')
@@ -165,31 +172,31 @@ export class UsersService {
         .where('fixture.matchday_id = :matchdayId', { matchdayId: currentMatchday.id })
         .orderBy('scoreLog.totalPoints', 'DESC')
         .addOrderBy('scoreLog.createdAt', 'ASC')
-        .getMany(),
-      this.leaderboardEntriesRepository
+        .getMany(), []),
+      this.safeOverviewQuery('matchday summary entries', this.leaderboardEntriesRepository
         .createQueryBuilder('entry')
         .where('entry.scope = :scope', { scope: 'global' })
         .andWhere('entry.matchday_id = :matchdayId', { matchdayId: currentMatchday.id })
-        .getMany(),
-      this.getMostPickedPlayer(fantasyTeam.tournament.id, 'selected'),
-      this.getMostPickedPlayer(fantasyTeam.tournament.id, 'captain'),
-      this.getMostPickedPlayer(fantasyTeam.tournament.id, 'vice_captain'),
-      this.getGameweekHistory(fantasyTeam.id),
-      this.getTransferTrend(currentMatchday.id, 'in'),
-      this.getTransferTrend(currentMatchday.id, 'out'),
-      this.getTopPlayersByMatchday(fantasyTeam.tournament.id, currentMatchday.number),
-      this.getMostValuableTeams(fantasyTeam.tournament.id),
-      this.getBestLeagues(fantasyTeam.tournament.id),
-      this.getLatestAvailabilityIssues(),
-      this.getNewlyAddedPlayers(),
-      this.getRecentTransfers(fantasyTeam.id),
-      this.getSetPieceCandidates(fantasyTeam.tournament.id),
-      this.getTeamOfTheWeekPlayers(currentMatchday.id),
-      this.getTeamOfTheTournamentPlayers(fantasyTeam.tournament.id),
-      this.countChipActivations(currentMatchday.id, ChipType.WILDCARD),
-      this.countChipActivations(currentMatchday.id, ChipType.BENCH_BOOST),
-      this.countChipActivations(currentMatchday.id, ChipType.FREE_HIT),
-      this.countChipActivations(currentMatchday.id, ChipType.TRIPLE_CAPTAIN),
+        .getMany(), []),
+      this.safeOverviewQuery('most selected player', this.getMostPickedPlayer(fantasyTeam.tournament.id, 'selected'), null),
+      this.safeOverviewQuery('most captained player', this.getMostPickedPlayer(fantasyTeam.tournament.id, 'captain'), null),
+      this.safeOverviewQuery('most vice captained player', this.getMostPickedPlayer(fantasyTeam.tournament.id, 'vice_captain'), null),
+      this.safeOverviewQuery('gameweek history', this.getGameweekHistory(fantasyTeam.id), []),
+      this.safeOverviewQuery('top transfers in', this.getTransferTrend(currentMatchday.id, 'in'), []),
+      this.safeOverviewQuery('top transfers out', this.getTransferTrend(currentMatchday.id, 'out'), []),
+      this.safeOverviewQuery('top players by matchday', this.getTopPlayersByMatchday(fantasyTeam.tournament.id, currentMatchday.number), []),
+      this.safeOverviewQuery('most valuable teams', this.getMostValuableTeams(fantasyTeam.tournament.id), []),
+      this.safeOverviewQuery('best leagues', this.getBestLeagues(fantasyTeam.tournament.id), []),
+      this.safeOverviewQuery('latest injuries and bans', this.getLatestAvailabilityIssues(fantasyTeam.tournament.id), []),
+      this.safeOverviewQuery('newly added players', this.getNewlyAddedPlayers(fantasyTeam.tournament.id), []),
+      this.safeOverviewQuery('recent transfers', this.getRecentTransfers(fantasyTeam.id), []),
+      this.safeOverviewQuery('set piece candidates', this.getSetPieceCandidates(fantasyTeam.tournament.id), []),
+      this.safeOverviewQuery('team of the week', this.getTeamOfTheWeekPlayers(currentMatchday.id, fantasyTeam.tournament.id), []),
+      this.safeOverviewQuery('team of the tournament', this.getTeamOfTheTournamentPlayers(fantasyTeam.tournament.id), []),
+      this.safeOverviewQuery('wildcard count', this.countChipActivations(currentMatchday.id, ChipType.WILDCARD), 0),
+      this.safeOverviewQuery('bench boost count', this.countChipActivations(currentMatchday.id, ChipType.BENCH_BOOST), 0),
+      this.safeOverviewQuery('free hit count', this.countChipActivations(currentMatchday.id, ChipType.FREE_HIT), 0),
+      this.safeOverviewQuery('triple captain count', this.countChipActivations(currentMatchday.id, ChipType.TRIPLE_CAPTAIN), 0),
     ]);
 
     const chipLabels: Record<ChipType, string> = {
@@ -218,7 +225,7 @@ export class UsersService {
       };
     });
 
-    const scoreLogFixtureIds = new Set(scoreLogs.map((scoreLog) => scoreLog.fixture.id));
+    const scoreLogFixtureIds = new Set(scoreLogs.map((scoreLog) => scoreLog.fixture?.id).filter(Boolean));
     const dayGroups = new Map<string, FixtureEntity[]>();
     for (const fixture of fixtures) {
       const label = this.formatDayLabel(fixture.kickoffAt);
@@ -376,7 +383,7 @@ export class UsersService {
       kind,
       title: `Gameweek ${currentMatchday.number} Team of the Week`,
       description: 'The top fantasy performers for the current gameweek.',
-      players: await this.getTeamOfTheWeekPlayers(currentMatchday.id),
+      players: await this.getTeamOfTheWeekPlayers(currentMatchday.id, fantasyTeam.tournament.id),
     };
   }
 
@@ -578,12 +585,12 @@ export class UsersService {
     }));
   }
 
-  private async getLatestAvailabilityIssues() {
+  private async getLatestAvailabilityIssues(tournamentId: string) {
     const players = await this.playersRepository
       .createQueryBuilder('player')
       .leftJoinAndSelect('player.team', 'team')
-      .where('player.is_injured = true')
-      .orWhere('player.is_suspended = true')
+      .where('team.tournament_id = :tournamentId', { tournamentId })
+      .andWhere('(player.is_injured = true OR player.is_suspended = true)')
       .orderBy('player.updatedAt', 'DESC')
       .addOrderBy('player.name', 'ASC')
       .limit(5)
@@ -663,11 +670,12 @@ export class UsersService {
     }));
   }
 
-  private async getNewlyAddedPlayers(limit = 20) {
+  private async getNewlyAddedPlayers(tournamentId: string, limit = 20) {
     const players = await this.playersRepository
       .createQueryBuilder('player')
       .leftJoinAndSelect('player.team', 'team')
-      .where('player.is_active = true')
+      .where('team.tournament_id = :tournamentId', { tournamentId })
+      .andWhere('player.is_active = true')
       .orderBy('player.createdAt', 'DESC')
       .addOrderBy('player.name', 'ASC')
       .limit(limit)
@@ -857,7 +865,7 @@ export class UsersService {
     ];
   }
 
-  private async getTeamOfTheWeekPlayers(matchdayId: string) {
+  private async getTeamOfTheWeekPlayers(matchdayId: string, tournamentId: string) {
     const scoreLogs = await this.playerScoreLogsRepository
       .createQueryBuilder('scoreLog')
       .innerJoinAndSelect('scoreLog.player', 'player')
@@ -879,6 +887,10 @@ export class UsersService {
     }
 
     const fallbackPlayers = await this.playersRepository.find({
+      where: {
+        isActive: true,
+        team: { tournament: { id: tournamentId } },
+      },
       relations: { team: true },
       order: { totalPoints: 'DESC', name: 'ASC' },
       take: 40,
@@ -1011,6 +1023,17 @@ export class UsersService {
         matchday: { id: matchdayId },
       },
     });
+  }
+
+  private async safeOverviewQuery<T>(label: string, query: Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await query;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      this.logger.error(`Status overview query failed (${label}): ${message}`, stack);
+      return fallback;
+    }
   }
 
   private serializePlayer(player: PlayerEntity) {
