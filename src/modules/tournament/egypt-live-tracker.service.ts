@@ -460,15 +460,29 @@ export class SofaBrowserClient {
     }
 
     await this.close();
-    this.browser = await chromium.launch({
-      headless: true,
-      args: ['--disable-blink-features=AutomationControlled'],
-    });
+    try {
+      this.browser = await chromium.launch({
+        headless: true,
+        args: [
+          '--disable-blink-features=AutomationControlled',
+          '--disable-dev-shm-usage',
+          '--disable-setuid-sandbox',
+          '--no-sandbox',
+        ],
+      });
+    } catch (error) {
+      throw new Error(
+        `Unable to launch Chromium for SofaScore. Ensure Railway builds with backend/Dockerfile and includes Playwright browsers. ${String(error)}`,
+      );
+    }
 
     this.context = await this.browser.newContext({
       userAgent: this.userAgent,
       locale: 'en-US',
       timezoneId: 'Africa/Cairo',
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
     });
 
     this.page = await this.context.newPage();
@@ -483,10 +497,13 @@ export class SofaBrowserClient {
     for (let attempt = 1; attempt <= 4; attempt++) {
       for (const target of bootstrapTargets) {
         try {
-          await this.page.goto(target, {
+          const response = await this.page.goto(target, {
             waitUntil: 'domcontentloaded',
             timeout: 120_000,
           });
+          if (response && !response.ok()) {
+            throw new Error(`HTTP ${response.status()} while opening ${target}.`);
+          }
           await this.page.waitForTimeout(1_000 * attempt);
           return;
         } catch (error) {
@@ -516,42 +533,47 @@ export class SofaBrowserClient {
       throw new Error('SofaBrowserClient not initialized.');
     }
 
+    const requestUrls = url.startsWith('https://www.sofascore.com/api/v1/')
+      ? [url, url.replace('https://www.sofascore.com/api/v1/', 'https://api.sofascore.com/api/v1/')]
+      : [url];
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
-      try {
-        const result = await this.page.evaluate(async (apiUrl) => {
-          const response = await fetch(apiUrl, {
-            method: 'GET',
-            headers: {
-              Accept: 'application/json, text/plain, */*',
-            },
-            credentials: 'include',
-            cache: 'no-store',
-          });
+      for (const requestUrl of requestUrls) {
+        try {
+          const result = await this.page.evaluate(async (apiUrl) => {
+            const response = await fetch(apiUrl, {
+              method: 'GET',
+              headers: {
+                Accept: 'application/json, text/plain, */*',
+              },
+              credentials: 'include',
+              cache: 'no-store',
+            });
 
-          const text = await response.text();
-          return {
-            ok: response.ok,
-            status: response.status,
-            text,
-          };
-        }, url);
+            const text = await response.text();
+            return {
+              ok: response.ok,
+              status: response.status,
+              text,
+            };
+          }, requestUrl);
 
-        if (!result.ok) {
-          throw new Error(`HTTP ${result.status} while fetching ${url}. Body: ${result.text.slice(0, 200)}`);
+          if (!result.ok) {
+            throw new Error(`HTTP ${result.status} while fetching ${requestUrl}. Body: ${result.text.slice(0, 200)}`);
+          }
+
+          return JSON.parse(result.text) as T;
+        } catch (error) {
+          lastError = error;
         }
+      }
 
-        return JSON.parse(result.text) as T;
-      } catch (error) {
-        lastError = error;
-
-        if (attempt === Math.ceil(attempts / 2)) {
-          await this.close();
-          await this.init();
-        } else {
-          await this.page.waitForTimeout(1_200 * attempt);
-        }
+      if (attempt === Math.ceil(attempts / 2)) {
+        await this.close();
+        await this.init();
+      } else {
+        await this.page.waitForTimeout(1_200 * attempt);
       }
     }
 

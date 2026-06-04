@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
+import { BadGatewayException, BadRequestException, Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -449,9 +449,9 @@ export class FeedService implements OnModuleDestroy {
     const matchday = await this.getSofaPrepareMatchday(dto.tournamentId, dto.matchdayId);
     const season = await this.resolveSofaScoreSeason(dto.sofaScoreTournamentId, dto.sofaScoreSeasonId, matchday.tournament.year);
 
-    await this.sofaClient.init();
-    const response = await this.sofaClient.requestJson<{ events?: SofaRoundEvent[] }>(
+    const response = await this.requestSofaScoreJson<{ events?: SofaRoundEvent[] }>(
       `https://www.sofascore.com/api/v1/unique-tournament/${dto.sofaScoreTournamentId}/season/${season.id}/events/round/${dto.sofaScoreRound}`,
+      'matchday preview',
     );
     const remoteEvents = (response.events ?? []).filter((event): event is SofaRoundEvent & { id: number } => (
       typeof event.id === 'number' && Number.isFinite(event.id)
@@ -645,8 +645,10 @@ export class FeedService implements OnModuleDestroy {
       throw new BadRequestException('The provided SofaScore team URL does not contain a valid team id.');
     }
 
-    await this.sofaClient.init();
-    const roster = await this.sofaClient.requestJson<SofaTeamPlayersResponse>(`https://www.sofascore.com/api/v1/team/${sofaScoreTeamId}/players`);
+    const roster = await this.requestSofaScoreJson<SofaTeamPlayersResponse>(
+      `https://www.sofascore.com/api/v1/team/${sofaScoreTeamId}/players`,
+      'team players scrape',
+    );
     const rosterPlayers = roster.players ?? [];
 
     if (!rosterPlayers.length) {
@@ -823,9 +825,9 @@ export class FeedService implements OnModuleDestroy {
       return { id: requestedSeasonId };
     }
 
-    await this.sofaClient.init();
-    const response = await this.sofaClient.requestJson<{ seasons?: SofaSeason[] }>(
+    const response = await this.requestSofaScoreJson<{ seasons?: SofaSeason[] }>(
       `https://www.sofascore.com/api/v1/unique-tournament/${sofaScoreTournamentId}/seasons`,
+      'season lookup',
     );
     const seasons = (response.seasons ?? []).filter((season): season is SofaSeason & { id: number } => (
       typeof season.id === 'number' && Number.isFinite(season.id)
@@ -839,6 +841,18 @@ export class FeedService implements OnModuleDestroy {
       season.year === String(tournamentYear)
       || season.name?.includes(String(tournamentYear))
     )) ?? seasons[0];
+  }
+
+  private async requestSofaScoreJson<T>(url: string, operation: string): Promise<T> {
+    try {
+      return await this.sofaClient.requestJson<T>(url);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      this.logger.error(`SofaScore ${operation} failed: ${message}`, stack);
+
+      throw new BadGatewayException(`SofaScore ${operation} failed: ${message}`);
+    }
   }
 
   private buildSofaMatchdayPreviewItem(

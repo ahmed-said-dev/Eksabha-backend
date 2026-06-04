@@ -1,5 +1,7 @@
 FROM mcr.microsoft.com/playwright:v1.59.1-jammy
 
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 WORKDIR /app
 
 COPY package*.json ./
