@@ -491,9 +491,10 @@ export class UsersService {
     const alias = direction === 'in' ? 'playerIn' : 'playerOut';
     const rawRows = await this.transfersRepository
       .createQueryBuilder('transfer')
-      .leftJoin(`transfer.${alias}`, 'player')
-      .leftJoin('player.team', 'team')
+      .innerJoin(`transfer.${alias}`, 'player')
+      .innerJoin('player.team', 'team')
       .where('transfer.matchday_id = :matchdayId', { matchdayId })
+      .andWhere('player.is_active = true')
       .select('player.id', 'playerId')
       .addSelect('player.external_provider_id', 'externalProviderId')
       .addSelect('player.name', 'playerName')
