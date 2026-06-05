@@ -1026,6 +1026,9 @@ export class ScoringService {
           details: {
             teamSide: participant.teamSide,
             reason: participant.started ? 'lineup_start' : 'substitution_appearance',
+            enteredMinute: participant.enteredMinute,
+            exitedMinute: participant.exitedMinute,
+            playedMinutes: participant.playedMinutes,
           },
         });
       }
@@ -1728,8 +1731,12 @@ export class ScoringService {
         order: { createdAt: 'ASC' },
       });
 
-    const playerTotalPoints = scoreLogs.reduce((sum, scoreLog) => sum + scoreLog.totalPoints, 0);
+    const [playerTotalPoints, playerMinutesPlayed] = await Promise.all([
+      Promise.resolve(scoreLogs.reduce((sum, scoreLog) => sum + scoreLog.totalPoints, 0)),
+      this.getPlayerMinutesPlayedFromEvents(playerId, tournamentId),
+    ]);
     player.totalPoints = playerTotalPoints;
+    player.minutesPlayed = playerMinutesPlayed;
     await this.playersRepository.save(player);
 
     const affectedPicks = await this.fantasyPicksRepository.find({
@@ -1758,9 +1765,36 @@ export class ScoringService {
     return {
       playerId,
       playerTotalPoints,
+      playerMinutesPlayed,
       affectedFantasyTeamIds: Array.from(affectedFantasyTeamIds),
       affectedFantasyTeams,
     };
+  }
+
+  private async getPlayerMinutesPlayedFromEvents(playerId: string, tournamentId?: string) {
+    const query = this.playerScoreEventsRepository
+      .createQueryBuilder('event')
+      .innerJoin('event.fixture', 'fixture')
+      .select('event.fixture_id', 'fixtureId')
+      .addSelect(
+        `MAX(CASE
+          WHEN event.type = 'appearance'
+            AND event.details ? 'playedMinutes'
+            AND (event.details ->> 'playedMinutes') ~ '^[0-9]+$'
+          THEN (event.details ->> 'playedMinutes')::int
+          ELSE event.minute
+        END)`,
+        'minutesPlayed',
+      )
+      .where('event.player_id = :playerId', { playerId })
+      .groupBy('event.fixture_id');
+
+    if (tournamentId) {
+      query.andWhere('fixture.tournament_id = :tournamentId', { tournamentId });
+    }
+
+    const rows = await query.getRawMany<{ fixtureId: string; minutesPlayed: string }>();
+    return rows.reduce((sum, row) => sum + (Number.parseInt(row.minutesPlayed, 10) || 0), 0);
   }
 
   private async recalculateFantasyTeamTotal(fantasyTeamId: string) {

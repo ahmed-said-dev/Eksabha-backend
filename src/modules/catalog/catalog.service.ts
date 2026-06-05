@@ -126,7 +126,7 @@ export class CatalogService {
 
     const [trendStats, liveStatsEntries] = await Promise.all([
       this.getPlayerTrendStats(players, tournamentId),
-      Promise.all(players.map(async (player) => ([player.id, await this.getPlayerLiveStats(player)] as const))),
+      Promise.all(players.map(async (player) => ([player.id, await this.getPlayerLiveStats(player, tournamentId)] as const))),
     ]);
 
     const liveStats = new Map(liveStatsEntries);
@@ -322,31 +322,36 @@ export class CatalogService {
     return effectiveAt >= startsAt && effectiveAt <= currentMatchday.deadlineAt;
   }
 
-  private async getPlayerLiveStats(player: PlayerEntity) {
-    const eventRows = await this.playerScoreEventsRepository
-      .createQueryBuilder('event')
-      .select('event.type', 'type')
-      .addSelect('COUNT(*)', 'count')
-      .where('event.player_id = :playerId', { playerId: player.id })
-      .groupBy('event.type')
-      .getRawMany<{ type: string; count: string }>();
+  private async getPlayerLiveStats(player: PlayerEntity, tournamentId?: string) {
+    const [eventRows, minutesPlayed] = await Promise.all([
+      this.playerScoreEventsRepository
+        .createQueryBuilder('event')
+        .select('event.type', 'type')
+        .addSelect('COUNT(*)', 'count')
+        .where('event.player_id = :playerId', { playerId: player.id })
+        .groupBy('event.type')
+        .getRawMany<{ type: string; count: string }>(),
+      this.getPlayerMinutesPlayedFromEvents(player.id, tournamentId),
+    ]);
 
     const eventCounts = new Map(eventRows.map((row) => [row.type, Number.parseInt(row.count, 10) || 0]));
-    const tournamentId = player.team?.tournament?.id;
+    const resolvedTournamentId = tournamentId ?? player.team?.tournament?.id;
 
     let ownership = 0;
     let selectedBy = 0;
 
-    if (tournamentId) {
+    if (resolvedTournamentId) {
       const [selectedTeamsRow, totalTeams] = await Promise.all([
         this.fantasyPicksRepository
           .createQueryBuilder('pick')
           .innerJoin('pick.fantasyTeam', 'fantasyTeam')
+          .innerJoin('pick.player', 'pickedPlayer')
           .select('COUNT(DISTINCT fantasyTeam.id)', 'count')
           .where('pick.player_id = :playerId', { playerId: player.id })
-          .andWhere('fantasyTeam.tournament_id = :tournamentId', { tournamentId })
+          .andWhere('fantasyTeam.tournament_id = :tournamentId', { tournamentId: resolvedTournamentId })
+          .andWhere('pickedPlayer.is_active = true')
           .getRawOne<{ count: string }>(),
-        this.fantasyTeamsRepository.count({ where: { tournament: { id: tournamentId } } }),
+        this.fantasyTeamsRepository.count({ where: { tournament: { id: resolvedTournamentId } } }),
       ]);
 
       const selectedTeams = Number.parseInt(selectedTeamsRow?.count ?? '0', 10) || 0;
@@ -356,7 +361,7 @@ export class CatalogService {
     }
 
     return {
-      minutesPlayed: player.minutesPlayed ?? 0,
+      minutesPlayed: Math.max(player.minutesPlayed ?? 0, minutesPlayed),
       goals: (eventCounts.get('goal') ?? 0) + (eventCounts.get('penalty_scored') ?? 0),
       assists: eventCounts.get('assist') ?? 0,
       cleanSheets: eventCounts.get('clean_sheet') ?? 0,
@@ -368,5 +373,31 @@ export class CatalogService {
       shotsOnTarget: null,
       passCompletion: null,
     };
+  }
+
+  private async getPlayerMinutesPlayedFromEvents(playerId: string, tournamentId?: string) {
+    const query = this.playerScoreEventsRepository
+      .createQueryBuilder('event')
+      .innerJoin('event.fixture', 'fixture')
+      .select('event.fixture_id', 'fixtureId')
+      .addSelect(
+        `MAX(CASE
+          WHEN event.type = 'appearance'
+            AND event.details ? 'playedMinutes'
+            AND (event.details ->> 'playedMinutes') ~ '^[0-9]+$'
+          THEN (event.details ->> 'playedMinutes')::int
+          ELSE event.minute
+        END)`,
+        'minutesPlayed',
+      )
+      .where('event.player_id = :playerId', { playerId })
+      .groupBy('event.fixture_id');
+
+    if (tournamentId) {
+      query.andWhere('fixture.tournament_id = :tournamentId', { tournamentId });
+    }
+
+    const rows = await query.getRawMany<{ fixtureId: string; minutesPlayed: string }>();
+    return rows.reduce((sum, row) => sum + (Number.parseInt(row.minutesPlayed, 10) || 0), 0);
   }
 }
