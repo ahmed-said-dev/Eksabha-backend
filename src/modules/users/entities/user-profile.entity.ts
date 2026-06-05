@@ -11,6 +11,9 @@ export class UserProfileEntity extends AppBaseEntity {
   @Column({ name: 'team_name', type: 'varchar', length: 120 })
   teamName!: string;
 
+  @Column({ name: 'mobile_number', type: 'varchar', length: 32, nullable: true })
+  mobileNumber!: string | null;
+
   @Column({ name: 'avatar_url', type: 'varchar', length: 500, nullable: true })
   avatarUrl!: string | null;
 

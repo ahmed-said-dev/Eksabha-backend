@@ -1096,6 +1096,7 @@ export class UsersService {
         ? {
             displayName: user.profile.displayName,
             teamName: user.profile.teamName,
+            mobileNumber: user.profile.mobileNumber,
             avatarUrl: user.profile.avatarUrl,
             locale: user.profile.locale,
             timezone: user.profile.timezone,
