@@ -5,6 +5,9 @@ import { In, Repository } from 'typeorm';
 import { PlayerEntity } from '../catalog/entities/player.entity';
 import { PlayerPriceEntity } from '../catalog/entities/player-price.entity';
 import { TeamEntity } from '../catalog/entities/team.entity';
+import { FantasyPickEntity } from '../fantasy/entities/fantasy-pick.entity';
+import { FantasyPickSnapshotEntity } from '../fantasy/entities/fantasy-pick-snapshot.entity';
+import { TransferEntity } from '../fantasy/entities/transfer.entity';
 import { PlayerPosition } from '../../common/database';
 import { BulkPlayerActionAdminDto } from './dto/bulk-player-action-admin.dto';
 import { BulkPlayerPricesDownloadAdminDto } from './dto/bulk-player-prices-download-admin.dto';
@@ -359,17 +362,21 @@ export class PlayerAdminService {
     const header = this.parseCsvLine(lines[0]);
     const playerIdIndex = header.findIndex((h) => h.toLowerCase().replace(/[^a-z]/g, '') === 'playerid');
     const newPriceIndex = header.findIndex((h) => h.toLowerCase().replace(/[^a-z]/g, '') === 'newprice');
+    const currentPriceIndex = header.findIndex((h) => h.toLowerCase().replace(/[^a-z]/g, '') === 'currentprice');
+    const priceIndex = header.findIndex((h) => h.toLowerCase().replace(/[^a-z]/g, '') === 'price');
+    const updatePriceIndex = newPriceIndex !== -1 ? newPriceIndex : priceIndex !== -1 ? priceIndex : currentPriceIndex;
+    const deletionPriceIndexes = Array.from(new Set([newPriceIndex, currentPriceIndex, priceIndex].filter((index) => index !== -1)));
     const newPositionIndex = header.findIndex((h) => h.toLowerCase().replace(/[^a-z]/g, '') === 'newposition');
 
     if (playerIdIndex === -1) {
       throw new BadRequestException('CSV must contain a playerId column.');
     }
 
-    if (newPriceIndex === -1 && newPositionIndex === -1) {
-      throw new BadRequestException('CSV must contain at least one of newPrice or newPosition columns.');
+    if (updatePriceIndex === -1 && newPositionIndex === -1) {
+      throw new BadRequestException('CSV must contain at least one of newPrice, price, currentPrice, or newPosition columns.');
     }
 
-    type CsvUpdate = { playerId: string; newPrice?: number; newPosition?: string };
+    type CsvUpdate = { playerId: string; newPrice?: number; newPosition?: string; shouldDelete?: boolean };
     const updates: CsvUpdate[] = [];
 
     for (let i = 1; i < lines.length; i++) {
@@ -381,15 +388,20 @@ export class PlayerAdminService {
 
       const update: CsvUpdate = { playerId };
 
-      if (newPriceIndex !== -1) {
-        const priceRaw = cells[newPriceIndex]?.trim();
+      if (updatePriceIndex !== -1) {
+        const priceRaw = cells[updatePriceIndex]?.trim();
         if (priceRaw !== undefined && priceRaw !== '') {
-          const newPrice = Number.parseFloat(priceRaw);
-          if (Number.isFinite(newPrice) && newPrice >= 0) {
+          const newPrice = this.parseCsvPrice(priceRaw);
+          if (newPrice !== null && newPrice >= 0) {
             update.newPrice = newPrice;
           }
         }
       }
+
+      update.shouldDelete = deletionPriceIndexes.some((index) => {
+        const raw = cells[index]?.trim();
+        return raw !== undefined && raw !== '' && this.parseCsvPrice(raw) === 0;
+      });
 
       if (newPositionIndex !== -1) {
         const posRaw = cells[newPositionIndex]?.trim();
@@ -398,7 +410,7 @@ export class PlayerAdminService {
         }
       }
 
-      if (update.newPrice !== undefined || update.newPosition !== undefined) {
+      if (update.shouldDelete || update.newPrice !== undefined || update.newPosition !== undefined) {
         updates.push(update);
       }
     }
@@ -415,12 +427,28 @@ export class PlayerAdminService {
     const playersById = new Map(players.map((p) => [p.id, p]));
     const missingPlayerIds: string[] = [];
     const changedPlayers: PlayerEntity[] = [];
+    const deletedPlayers: PlayerEntity[] = [];
+    const deletedPlayerIdsSet = new Set<string>();
+    const changedPlayerIdsSet = new Set<string>();
+    const deletionRequestedPlayerIds = new Set(
+      updates
+        .filter((update) => update.shouldDelete || update.newPrice === 0)
+        .map((update) => update.playerId),
+    );
     const skippedPlayerIds: string[] = [];
 
     for (const update of updates) {
       const player = playersById.get(update.playerId);
       if (!player) {
         missingPlayerIds.push(update.playerId);
+        continue;
+      }
+
+      if (deletionRequestedPlayerIds.has(update.playerId)) {
+        if (!deletedPlayerIdsSet.has(player.id)) {
+          deletedPlayers.push(player);
+          deletedPlayerIdsSet.add(player.id);
+        }
         continue;
       }
 
@@ -437,20 +465,27 @@ export class PlayerAdminService {
       }
 
       if (hasChanges) {
-        changedPlayers.push(player);
+        if (!changedPlayerIdsSet.has(player.id)) {
+          changedPlayers.push(player);
+          changedPlayerIdsSet.add(player.id);
+        }
       } else {
         skippedPlayerIds.push(update.playerId);
       }
     }
 
-    if (!changedPlayers.length) {
+    if (!changedPlayers.length && !deletedPlayers.length) {
       return {
         success: true,
         applied: 0,
+        updated: 0,
+        deleted: 0,
         skipped: skippedPlayerIds.length,
         missing: missingPlayerIds.length,
         missingPlayerIds,
         skippedPlayerIds,
+        updatedPlayerIds: [],
+        deletedPlayerIds: [],
         message: 'No changes were applied. All values matched existing data.',
       };
     }
@@ -458,6 +493,60 @@ export class PlayerAdminService {
     await this.playersRepository.manager.transaction(async (manager) => {
       const playerRepository = manager.getRepository(PlayerEntity);
       const playerPriceRepository = manager.getRepository(PlayerPriceEntity);
+      const deletedPlayerIds = deletedPlayers.map((player) => player.id);
+
+      if (deletedPlayerIds.length) {
+        await manager
+          .createQueryBuilder()
+          .delete()
+          .from(FantasyPickEntity)
+          .where('player_id IN (:...deletedPlayerIds)', { deletedPlayerIds })
+          .execute();
+
+        await manager
+          .createQueryBuilder()
+          .delete()
+          .from(FantasyPickSnapshotEntity)
+          .where('player_id IN (:...deletedPlayerIds)', { deletedPlayerIds })
+          .execute();
+
+        await manager
+          .createQueryBuilder()
+          .delete()
+          .from(TransferEntity)
+          .where('player_out_id IN (:...deletedPlayerIds)', { deletedPlayerIds })
+          .orWhere('player_in_id IN (:...deletedPlayerIds)', { deletedPlayerIds })
+          .execute();
+
+        await manager.query(
+          `
+          UPDATE user_profiles
+          SET
+            watchlist_player_ids = COALESCE(
+              (
+                SELECT jsonb_agg(player_id)
+                FROM jsonb_array_elements_text(watchlist_player_ids) AS watchlist_value(player_id)
+                WHERE player_id <> ALL($1::text[])
+              ),
+              '[]'::jsonb
+            ),
+            favorite_player_ids = COALESCE(
+              (
+                SELECT jsonb_agg(player_id)
+                FROM jsonb_array_elements_text(favorite_player_ids) AS favorite_value(player_id)
+                WHERE player_id <> ALL($1::text[])
+              ),
+              '[]'::jsonb
+            )
+          WHERE
+            watchlist_player_ids ?| $1::text[]
+            OR favorite_player_ids ?| $1::text[]
+          `,
+          [deletedPlayerIds],
+        );
+
+        await playerRepository.delete(deletedPlayerIds);
+      }
 
       for (const player of changedPlayers) {
         await playerRepository.save(player);
@@ -472,12 +561,15 @@ export class PlayerAdminService {
 
     return {
       success: true,
-      applied: changedPlayers.length,
+      applied: changedPlayers.length + deletedPlayers.length,
+      updated: changedPlayers.length,
+      deleted: deletedPlayers.length,
       skipped: skippedPlayerIds.length,
       missing: missingPlayerIds.length,
       missingPlayerIds,
       skippedPlayerIds,
       updatedPlayerIds: changedPlayers.map((p) => p.id),
+      deletedPlayerIds: deletedPlayers.map((p) => p.id),
     };
   }
 
@@ -651,6 +743,25 @@ export class PlayerAdminService {
 
     result.push(current);
     return result;
+  }
+
+  private parseCsvPrice(value: string): number | null {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const normalized = trimmed
+      .replace(/\uFEFF/g, '')
+      .replace(/\s+/g, '')
+      .replace(/,/g, '.');
+    const match = normalized.match(/-?\d+(?:\.\d+)?/);
+    if (!match) {
+      return null;
+    }
+
+    const parsed = Number.parseFloat(match[0]);
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   private buildShortName(fullName: string) {
