@@ -63,9 +63,11 @@ export class CatalogService {
     const queryBuilder = this.playersRepository
       .createQueryBuilder('player')
       .leftJoinAndSelect('player.team', 'team')
-      .where('team.tournament_id = :tournamentId', { tournamentId: resolvedTournamentId })
+      .where('player.is_active = :isActive', { isActive: true })
       .orderBy('player.totalPoints', 'DESC')
       .addOrderBy('player.name', 'ASC');
+
+    queryBuilder.andWhere('team.tournament_id = :tournamentId', { tournamentId: resolvedTournamentId });
 
     if (options.teamId) {
       queryBuilder.andWhere('team.id = :teamId', { teamId: options.teamId });
@@ -91,12 +93,13 @@ export class CatalogService {
     const playerLookup = this.playersRepository
       .createQueryBuilder('player')
       .leftJoinAndSelect('player.team', 'team')
-      .leftJoinAndSelect('team.tournament', 'tournament');
+      .leftJoinAndSelect('team.tournament', 'tournament')
+      .where('player.is_active = :isActive', { isActive: true });
 
     if (UUID_V4_OR_V5_REGEX.test(playerId)) {
-      playerLookup.where('player.id = :playerId', { playerId });
+      playerLookup.andWhere('player.id = :playerId', { playerId });
     } else {
-      playerLookup.where('player.external_provider_id = :playerId', { playerId });
+      playerLookup.andWhere('player.external_provider_id = :playerId', { playerId });
     }
 
     const player = await playerLookup.getOne();
