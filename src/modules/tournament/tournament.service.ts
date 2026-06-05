@@ -263,9 +263,12 @@ export class TournamentService {
       };
     }
 
-    let derivedHomeScore = 0;
-    let derivedAwayScore = 0;
-    let hasDerivedScoreSignal = false;
+    let scorePayloadHome = 0;
+    let scorePayloadAway = 0;
+    let hasScorePayloadSignal = false;
+    let eventCountHome = 0;
+    let eventCountAway = 0;
+    let hasEventCountSignal = false;
 
     for (const event of input.events) {
       if (!event || typeof event !== 'object') {
@@ -273,7 +276,7 @@ export class TournamentService {
       }
 
       const eventTypeValue = event.type ?? event.mappedType ?? event.incidentType;
-      const eventType = typeof eventTypeValue === 'string' ? eventTypeValue : null;
+      const eventType = typeof eventTypeValue === 'string' ? eventTypeValue.toLowerCase() : null;
 
       const scorePayload = 'score' in event && event.score && typeof event.score === 'object'
         ? event.score as Record<string, unknown>
@@ -283,9 +286,9 @@ export class TournamentService {
       const eventAwayScore = typeof scorePayload?.away === 'number' ? scorePayload.away : null;
 
       if (eventHomeScore !== null && eventAwayScore !== null) {
-        derivedHomeScore = Math.max(derivedHomeScore, eventHomeScore);
-        derivedAwayScore = Math.max(derivedAwayScore, eventAwayScore);
-        hasDerivedScoreSignal = true;
+        scorePayloadHome = Math.max(scorePayloadHome, eventHomeScore);
+        scorePayloadAway = Math.max(scorePayloadAway, eventAwayScore);
+        hasScorePayloadSignal = true;
       }
 
       if (eventType !== 'goal' && eventType !== 'penalty_scored' && eventType !== 'own_goal') {
@@ -305,31 +308,33 @@ export class TournamentService {
         continue;
       }
 
-      hasDerivedScoreSignal = true;
+      hasEventCountSignal = true;
 
       if (eventType === 'own_goal') {
         if (isHomeTeamEvent) {
-          derivedAwayScore += 1;
+          eventCountAway += 1;
         } else if (isAwayTeamEvent) {
-          derivedHomeScore += 1;
+          eventCountHome += 1;
         }
         continue;
       }
 
       if (isHomeTeamEvent) {
-        derivedHomeScore += 1;
+        eventCountHome += 1;
       } else if (isAwayTeamEvent) {
-        derivedAwayScore += 1;
+        eventCountAway += 1;
       }
     }
 
-    if (!hasDerivedScoreSignal) {
+    if (!hasScorePayloadSignal && !hasEventCountSignal) {
       return {
         homeScore: input.homeScore,
         awayScore: input.awayScore,
       };
     }
 
+    const derivedHomeScore = hasScorePayloadSignal ? scorePayloadHome : eventCountHome;
+    const derivedAwayScore = hasScorePayloadSignal ? scorePayloadAway : eventCountAway;
     const storedHomeScore = input.homeScore;
     const storedAwayScore = input.awayScore;
     const storedTotal = (storedHomeScore ?? 0) + (storedAwayScore ?? 0);
